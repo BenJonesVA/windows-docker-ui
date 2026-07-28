@@ -70,6 +70,9 @@ export const api = {
     request<Me>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => request<{ ok: true }>('/api/auth/logout', { method: 'POST' }),
   me: () => request<Me>('/api/auth/me'),
+  getSetupStatus: () => request<{ needsSetup: boolean }>('/api/setup/status'),
+  completeSetup: (email: string, password: string) =>
+    request<Me>('/api/setup', { method: 'POST', body: JSON.stringify({ email, password }) }),
 
   getMeta: () => request<InstanceMeta>('/api/instances/meta'),
   listInstances: () => request<SandboxInstance[]>('/api/instances'),

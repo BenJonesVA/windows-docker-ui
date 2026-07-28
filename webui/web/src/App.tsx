@@ -4,6 +4,7 @@ import { api, type Me, type SandboxInstance } from './api';
 import { applyTheme, getStoredTheme, type Theme } from './theme';
 import { statusMeta } from './status';
 import { Login } from './pages/Login';
+import { Setup } from './pages/Setup';
 import { Dashboard } from './pages/Dashboard';
 import { InstanceDetail } from './pages/InstanceDetail';
 
@@ -16,6 +17,7 @@ function navDotClass(badgeClassName: string): string {
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [checked, setChecked] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
   const [navInstances, setNavInstances] = useState<SandboxInstance[]>([]);
   const navigate = useNavigate();
@@ -32,6 +34,19 @@ export function App() {
       .catch(() => setMe(null))
       .finally(() => setChecked(true));
   }, []);
+
+  // Only matters pre-login — a logged-in session means setup already
+  // happened (there's at least one user: whoever is logged in). Checked
+  // alongside `me` rather than only once !me is known, so the Setup/Login
+  // decision resolves before the unauthenticated screen ever paints — this
+  // is what avoids a Login flash on a truly fresh deploy.
+  useEffect(() => {
+    if (me) return;
+    api
+      .getSetupStatus()
+      .then((s) => setNeedsSetup(s.needsSetup))
+      .catch(() => setNeedsSetup(false));
+  }, [me]);
 
   // Polled independently of the Dashboard's own list — this needs to render
   // on every route (including InstanceDetail, where Dashboard isn't mounted
@@ -57,9 +72,12 @@ export function App() {
     };
   }, [me]);
 
-  if (!checked) return null;
+  if (!checked || (!me && needsSetup === null)) return null;
 
   if (!me) {
+    if (needsSetup) {
+      return <Setup onComplete={() => api.me().then(setMe)} />;
+    }
     return <Login onLogin={() => api.me().then(setMe)} />;
   }
 
