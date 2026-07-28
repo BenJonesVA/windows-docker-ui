@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ResourceTier } from '../db/schema.js';
 
 // Whitelist of VERSION codes this project supports, taken verbatim from
 // windows/readme.md ("How do I select the Windows version?"). Deliberately
@@ -15,14 +16,6 @@ export const ALLOWED_WINDOWS_VERSIONS = [
   '2025', '2022', '2019', '2016', '2012', '2008', '2003',
   'core11', 'tiny11', 'tiny10',
 ] as const;
-
-// Bounds are deliberately conservative for a first deployment; make these
-// admin-configurable resource_tiers rows once that table exists (plan item #14).
-export const RAM_MB_MIN = 2048;
-export const RAM_MB_MAX = 8192;
-export const CPU_CORES_MIN = 1;
-export const CPU_CORES_MAX = 4;
-export const DISK_GB_MAX = 128;
 
 // 32GB was never a dockur/windows requirement — there's no enforced minimum
 // in its scripts (define.sh/image.sh), and 64GB in its docs is only the
@@ -48,29 +41,38 @@ const ABSOLUTE_DISK_GB_MIN = Math.min(...Object.values(VERSION_DISK_MIN_GB));
 // export so the two paths can't silently drift apart.
 export const instanceNameSchema = z.string().trim().min(1).max(64);
 
+type ResourceBounds = Pick<ResourceTier, 'ramMbMin' | 'ramMbMax' | 'cpuCoresMin' | 'cpuCoresMax' | 'diskGbMax'>;
+
+// Bounds come from the active resource tier (plan item #14, db/resourceTiers.ts)
+// rather than static constants — built fresh per request in api/instances.ts
+// (create route and /meta) so an admin's edit to the tier takes effect
+// immediately, not just for instances created after a restart.
+//
 // Numeric only — deliberately rejects upstream's own "half"/"max" string
 // shortcuts for RAM_SIZE/CPU_CORES, which would otherwise let a request claim
 // the entire host.
-export const createInstanceSchema = z
-  .object({
-    name: instanceNameSchema,
-    windowsVersion: z.enum(ALLOWED_WINDOWS_VERSIONS),
-    ramMb: z.number().int().min(RAM_MB_MIN).max(RAM_MB_MAX),
-    cpuCores: z.number().int().min(CPU_CORES_MIN).max(CPU_CORES_MAX),
-    diskGb: z.number().int().min(ABSOLUTE_DISK_GB_MIN).max(DISK_GB_MAX),
-  })
-  .superRefine((data, ctx) => {
-    const minForVersion = VERSION_DISK_MIN_GB[data.windowsVersion];
-    if (data.diskGb < minForVersion) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['diskGb'],
-        message: `diskGb must be at least ${minForVersion} for windowsVersion "${data.windowsVersion}"`,
-      });
-    }
-  });
+export function buildCreateInstanceSchema(tier: ResourceBounds) {
+  return z
+    .object({
+      name: instanceNameSchema,
+      windowsVersion: z.enum(ALLOWED_WINDOWS_VERSIONS),
+      ramMb: z.number().int().min(tier.ramMbMin).max(tier.ramMbMax),
+      cpuCores: z.number().int().min(tier.cpuCoresMin).max(tier.cpuCoresMax),
+      diskGb: z.number().int().min(ABSOLUTE_DISK_GB_MIN).max(tier.diskGbMax),
+    })
+    .superRefine((data, ctx) => {
+      const minForVersion = VERSION_DISK_MIN_GB[data.windowsVersion];
+      if (data.diskGb < minForVersion) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['diskGb'],
+          message: `diskGb must be at least ${minForVersion} for windowsVersion "${data.windowsVersion}"`,
+        });
+      }
+    });
+}
 
-export type CreateInstanceInput = z.infer<typeof createInstanceSchema>;
+export type CreateInstanceInput = z.infer<ReturnType<typeof buildCreateInstanceSchema>>;
 
 // IPv4 dotted-quad, optional /0-32 prefix. IPv6 and hostnames deliberately
 // excluded — the firewall helper (docker/firewall.ts) only ever emits IPv4
@@ -113,3 +115,33 @@ export const setEgressPolicySchema = z
 export type SetEgressPolicyInput = z.infer<typeof setEgressPolicySchema>;
 
 export const renameInstanceSchema = z.object({ name: instanceNameSchema });
+
+// Plan item #14 admin routes (api/admin.ts). Bounds themselves are
+// deliberately unopinionated here (an admin can set genuinely wide limits) —
+// the invariant this enforces is internal consistency (min <= max), not a
+// specific ceiling.
+export const updateResourceTierSchema = z
+  .object({
+    ramMbMin: z.number().int().positive(),
+    ramMbMax: z.number().int().positive(),
+    cpuCoresMin: z.number().int().positive(),
+    cpuCoresMax: z.number().int().positive(),
+    diskGbMax: z.number().int().positive(),
+    idleTimeoutSeconds: z.number().int().positive(),
+    maxLifetimeSeconds: z.number().int().positive(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.ramMbMin > data.ramMbMax) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ramMbMin'], message: 'ramMbMin must be <= ramMbMax' });
+    }
+    if (data.cpuCoresMin > data.cpuCoresMax) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cpuCoresMin'], message: 'cpuCoresMin must be <= cpuCoresMax' });
+    }
+  });
+
+export type UpdateResourceTierInput = z.infer<typeof updateResourceTierSchema>;
+
+// null clears the override (falls back to the tier's maxLifetimeSeconds).
+export const setMaxUptimeOverrideSchema = z.object({
+  maxUptimeOverrideSeconds: z.number().int().positive().nullable(),
+});

@@ -1,15 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { users, sandboxInstances } from '../db/schema.js';
+import { users, sandboxInstances, resourceTiers } from '../db/schema.js';
 import { requireAdmin } from '../plugins/auth-context.js';
 import { serializeInstance } from './serialize.js';
+import { getActiveTier } from '../db/resourceTiers.js';
+import { updateResourceTierSchema, setMaxUptimeOverrideSchema } from '../docker/validators.js';
 
-// Plan item #6 — admin panel, scoped to user management and admin-wide
-// instance visibility. Resource-tier editing (RAM/CPU/disk bounds, idle/
-// lifetime timeouts) is plan item #14, a separate DB table this doesn't
-// touch — see reconciler/index.ts and docker/validators.ts for where those
-// hardcoded constants currently live.
+// Plan item #6 — admin panel: user management, admin-wide instance
+// visibility, and (plan item #14) the resource tier that replaces what used
+// to be hardcoded constants in reconciler/index.ts and docker/validators.ts.
 export default async function adminRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', requireAdmin);
 
@@ -64,5 +64,43 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     return rows
       .filter((r) => !r.instance.deletedAt)
       .map((r) => ({ ...serializeInstance(r.instance), ownerEmail: r.ownerEmail }));
+  });
+
+  // Plan item #14 — a single row today (see schema.ts's comment on
+  // resourceTiers); getActiveTier() lazily seeds it on first read, so this
+  // always returns something even before any admin has touched it.
+  fastify.get('/api/admin/resource-tier', async () => {
+    return getActiveTier();
+  });
+
+  fastify.put('/api/admin/resource-tier', async (request, reply) => {
+    const parsed = updateResourceTierSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
+    }
+    const tier = await getActiveTier(); // ensures the row exists before updating it
+    await db.update(resourceTiers).set(parsed.data).where(eq(resourceTiers.id, tier.id));
+    const [updated] = await db.select().from(resourceTiers).where(eq(resourceTiers.id, tier.id)).limit(1);
+    return updated;
+  });
+
+  // Plan item #14 — admin force-cap/force-suspend of a single running
+  // instance ahead of the tier's default lifetime, without changing the tier
+  // for everyone else. Not owner-scoped (deliberately — this is an admin
+  // action on any instance, not the owner's own routes in api/instances.ts).
+  fastify.post('/api/admin/instances/:id/max-uptime', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = setMaxUptimeOverrideSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
+    }
+    const [instance] = await db.select().from(sandboxInstances).where(eq(sandboxInstances.id, id)).limit(1);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    await db
+      .update(sandboxInstances)
+      .set({ maxUptimeOverrideSeconds: parsed.data.maxUptimeOverrideSeconds })
+      .where(eq(sandboxInstances.id, id));
+    return { ok: true };
   });
 }

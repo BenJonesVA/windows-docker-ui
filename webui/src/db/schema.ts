@@ -10,6 +10,27 @@ export const users = sqliteTable('users', {
   disabledAt: integer('disabled_at'),
 });
 
+// Plan item #14 — admin-editable replacement for the constants that used to
+// be hardcoded in reconciler/index.ts and docker/validators.ts. A true
+// multi-tier system (several rows, a tier assigned per instance or per user)
+// is bigger scope than this pass covers — deliberately not built yet, since
+// that needs its own design pass (which tier a user picks, whether users are
+// restricted to specific tiers). For now this table only ever holds one row;
+// `db/resourceTiers.ts`'s getActiveTier() lazily seeds it with today's
+// existing hardcoded values on first read, so behavior is unchanged until an
+// admin actually edits it.
+export const resourceTiers = sqliteTable('resource_tiers', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  ramMbMin: integer('ram_mb_min').notNull(),
+  ramMbMax: integer('ram_mb_max').notNull(),
+  cpuCoresMin: integer('cpu_cores_min').notNull(),
+  cpuCoresMax: integer('cpu_cores_max').notNull(),
+  diskGbMax: integer('disk_gb_max').notNull(),
+  idleTimeoutSeconds: integer('idle_timeout_seconds').notNull(),
+  maxLifetimeSeconds: integer('max_lifetime_seconds').notNull(),
+});
+
 export const sessions = sqliteTable('sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id),
@@ -68,6 +89,13 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   // table would be overhead without a real query need.
   egressAllowlist: text('egress_allowlist').notNull().default('[]'),
 
+  // Plan item #14 — lets an admin force-cap (or effectively force-suspend,
+  // by setting a value already in the past) an individual running sandbox
+  // ahead of the tier's default max lifetime, without changing the tier
+  // itself for everyone else. Null means "use the tier's maxLifetimeSeconds"
+  // — see reconciler/index.ts's reapIdleAndExpired.
+  maxUptimeOverrideSeconds: integer('max_uptime_override_seconds'),
+
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   startedAt: integer('started_at'),
   stoppedAt: integer('stopped_at'),
@@ -79,3 +107,4 @@ export type User = typeof users.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type SandboxInstance = typeof sandboxInstances.$inferSelect;
 export type NewSandboxInstance = typeof sandboxInstances.$inferInsert;
+export type ResourceTier = typeof resourceTiers.$inferSelect;

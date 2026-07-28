@@ -5,11 +5,8 @@ import { db } from '../db/client.js';
 import { sandboxInstances } from '../db/schema.js';
 import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY, type EgressPolicy } from '../docker/firewall.js';
 import { stopInstanceContainer } from '../docker/template.js';
+import { getActiveTier } from '../db/resourceTiers.js';
 
-// Vertical-slice defaults — move to per-tier resource_tiers columns once that
-// table exists (plan item #14). Deliberately conservative.
-const IDLE_TIMEOUT_SECONDS = 30 * 60; // 30 min
-const MAX_LIFETIME_SECONDS = 8 * 60 * 60; // 8 h
 const PENDING_GRACE_SECONDS = 2 * 60; // how long a create is allowed to be mid-flight
 const READINESS_PROBE_TIMEOUT_MS = 2000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -115,6 +112,7 @@ async function probeReadiness(log: FastifyBaseLogger) {
 
 async function reapIdleAndExpired(log: FastifyBaseLogger) {
   const now = Math.floor(Date.now() / 1000);
+  const tier = await getActiveTier();
   const running = await db
     .select()
     .from(sandboxInstances)
@@ -131,11 +129,14 @@ async function reapIdleAndExpired(log: FastifyBaseLogger) {
     const lastActive = instance.lastSeenAt ?? instance.startedAt ?? instance.createdAt;
     const idleFor = now - lastActive;
     const ageFor = now - instance.createdAt;
+    // Plan item #14 — an admin's per-instance override takes priority over
+    // the tier's default; null (the common case) falls back to the tier.
+    const maxLifetime = instance.maxUptimeOverrideSeconds ?? tier.maxLifetimeSeconds;
 
     const reason =
-      idleFor > IDLE_TIMEOUT_SECONDS
+      idleFor > tier.idleTimeoutSeconds
         ? 'idle-timeout'
-        : ageFor > MAX_LIFETIME_SECONDS
+        : ageFor > maxLifetime
           ? 'max-lifetime'
           : null;
     if (!reason) continue;

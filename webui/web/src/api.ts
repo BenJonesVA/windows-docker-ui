@@ -59,6 +59,7 @@ export interface SandboxInstance {
   phase: 'installing' | 'ready' | 'failed';
   egressMode: 'open' | 'blocked' | 'allowlist';
   egressAllowlist: string[];
+  maxUptimeOverrideSeconds: number | null;
   accountPassword: string | null;
   createdAt: number;
   startedAt: number | null;
@@ -75,6 +76,18 @@ export interface AdminUser {
 
 export interface AdminInstance extends SandboxInstance {
   ownerEmail: string;
+}
+
+export interface ResourceTier {
+  id: string;
+  name: string;
+  ramMbMin: number;
+  ramMbMax: number;
+  cpuCoresMin: number;
+  cpuCoresMax: number;
+  diskGbMax: number;
+  idleTimeoutSeconds: number;
+  maxLifetimeSeconds: number;
 }
 
 export const api = {
@@ -118,4 +131,12 @@ export const api = {
   disableAdminUser: (id: string) => request<{ ok: true }>(`/api/admin/users/${id}/disable`, { method: 'POST' }),
   enableAdminUser: (id: string) => request<{ ok: true }>(`/api/admin/users/${id}/enable`, { method: 'POST' }),
   listAdminInstances: () => request<AdminInstance[]>('/api/admin/instances'),
+  getResourceTier: () => request<ResourceTier>('/api/admin/resource-tier'),
+  updateResourceTier: (input: Omit<ResourceTier, 'id' | 'name'>) =>
+    request<ResourceTier>('/api/admin/resource-tier', { method: 'PUT', body: JSON.stringify(input) }),
+  setMaxUptimeOverride: (instanceId: string, maxUptimeOverrideSeconds: number | null) =>
+    request<{ ok: true }>(`/api/admin/instances/${instanceId}/max-uptime`, {
+      method: 'POST',
+      body: JSON.stringify({ maxUptimeOverrideSeconds }),
+    }),
 };

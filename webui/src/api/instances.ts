@@ -8,17 +8,13 @@ import { serializeInstance } from './serialize.js';
 import { docker } from '../docker/client.js';
 import { ensureInstanceFirewall } from '../docker/firewall.js';
 import {
-  createInstanceSchema,
+  buildCreateInstanceSchema,
   setEgressPolicySchema,
   renameInstanceSchema,
   ALLOWED_WINDOWS_VERSIONS,
   VERSION_DISK_MIN_GB,
-  DISK_GB_MAX,
-  RAM_MB_MIN,
-  RAM_MB_MAX,
-  CPU_CORES_MIN,
-  CPU_CORES_MAX,
 } from '../docker/validators.js';
+import { getActiveTier } from '../db/resourceTiers.js';
 import {
   createInstanceContainer,
   startInstanceContainer,
@@ -61,22 +57,26 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', requireAuth);
 
   // Lets the create form render real, enforced bounds instead of a
-  // hand-maintained copy that can silently drift out of sync with
-  // docker/validators.ts (the actual server-side enforcement).
-  fastify.get('/api/instances/meta', async () => ({
-    versions: ALLOWED_WINDOWS_VERSIONS,
-    diskMinByVersion: VERSION_DISK_MIN_GB,
-    diskMaxGb: DISK_GB_MAX,
-    ramMinMb: RAM_MB_MIN,
-    ramMaxMb: RAM_MB_MAX,
-    cpuMinCores: CPU_CORES_MIN,
-    cpuMaxCores: CPU_CORES_MAX,
-    // Plan item #19 — the pinned base image is the one piece of "OS image"
-    // this app actually controls (dockur/windows fetches the Windows ISO
-    // itself at first boot; this project has no hook into that, so there's
-    // nothing to list/remove there).
-    baseImage: IMAGE_REF,
-  }));
+  // hand-maintained copy that can silently drift out of sync with the
+  // active resource tier (docker/validators.ts's buildCreateInstanceSchema
+  // — the actual server-side enforcement, built from the same tier below).
+  fastify.get('/api/instances/meta', async () => {
+    const tier = await getActiveTier();
+    return {
+      versions: ALLOWED_WINDOWS_VERSIONS,
+      diskMinByVersion: VERSION_DISK_MIN_GB,
+      diskMaxGb: tier.diskGbMax,
+      ramMinMb: tier.ramMbMin,
+      ramMaxMb: tier.ramMbMax,
+      cpuMinCores: tier.cpuCoresMin,
+      cpuMaxCores: tier.cpuCoresMax,
+      // Plan item #19 — the pinned base image is the one piece of "OS image"
+      // this app actually controls (dockur/windows fetches the Windows ISO
+      // itself at first boot; this project has no hook into that, so there's
+      // nothing to list/remove there).
+      baseImage: IMAGE_REF,
+    };
+  });
 
   // Plan item #19 — soft-deleted instances (DELETE /api/instances/:id with
   // retain_disk=true) leave their Docker volume behind with no way to see or
@@ -145,7 +145,8 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
 
   fastify.post('/api/instances', async (request, reply) => {
     const owner = request.currentUser!;
-    const parsed = createInstanceSchema.safeParse(request.body);
+    const tier = await getActiveTier();
+    const parsed = buildCreateInstanceSchema(tier).safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
     }
