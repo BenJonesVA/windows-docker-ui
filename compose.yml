@@ -1,0 +1,57 @@
+# Deploys the webui manager only. It creates/destroys individual
+# dockurr/windows containers itself at runtime via the Docker API — those are
+# not services in this file.
+#
+# Before `docker compose up`, on the host:
+#   1. Confirm KVM is actually available: `ls -l /dev/kvm` and `kvm-ok`.
+#      Without it, every sandbox instance the webui creates will fail to
+#      start — this must work before anything else here matters.
+#   2. Merge deploy/daemon.json into /etc/docker/daemon.json (don't
+#      overwrite — preserve any existing keys), then `systemctl restart
+#      docker`. This bounces every container on the host, so treat it as a
+#      maintenance window if anything else is already running. Needed
+#      because the default address-pool only supports ~30 user-defined
+#      networks, and this app creates one bridge network per instance.
+#   3. Pre-pull the pinned image: the digest baked into
+#      webui/src/docker/template.ts is not fetched automatically — dockerode
+#      calls the raw Docker API, which 404s on a missing image the way
+#      `docker run` never does.
+#      docker pull dockurr/windows@sha256:743847e75b776790c059f33ac6654f84727ba36a6d458a61e37cb2b2f043d168
+#   4. Copy .env.example to .env and fill it in.
+#
+# Port 8080 is bound to loopback only. Put a TLS-terminating reverse proxy
+# (Caddy, nginx, etc.) in front on 443 and point it at 127.0.0.1:8080 —
+# COOKIE_SECURE=true means the login cookie is dropped by the browser over
+# plain http.
+services:
+  webui:
+    build:
+      context: ./webui
+    container_name: sandbox-webui
+    restart: unless-stopped
+    environment:
+      # Must equal container_name above, byte for byte — the app joins each
+      # instance's dedicated network under this name (docker/template.ts).
+      SELF_CONTAINER_NAME: sandbox-webui
+      # docker/client.ts defaults to /var/run/docker-native.sock — that's this
+      # repo's WSL2 dev-only socket name (a native engine bound there, to
+      # dodge Docker Desktop's KVM-less one). A real host's Docker Engine
+      # socket is /var/run/docker.sock, which is what's bind-mounted below —
+      # override the default to match or the app can't reach the daemon at
+      # all and crash-loops on startup.
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      DATABASE_PATH: /data/webui.sqlite
+    ports:
+      - '127.0.0.1:8080:8080'
+    volumes:
+      - webui-data:/data
+      # Grants this container root-equivalent control over the Docker host
+      # (create/remove containers, networks, volumes) — required for the
+      # instance-management model, not an oversight. The actual access
+      # boundary is who can authenticate to the webui itself.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  webui-data:

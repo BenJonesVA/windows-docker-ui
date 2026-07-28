@@ -1,0 +1,1 @@
+ALTER TABLE `sandbox_instances` ADD `account_password` text;
