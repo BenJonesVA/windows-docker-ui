@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { docker } from '../docker/client.js';
 import { db } from '../db/client.js';
 import { sandboxInstances } from '../db/schema.js';
+import { ensureInstanceFirewall, removeInstanceFirewall } from '../docker/firewall.js';
 import { stopInstanceContainer } from '../docker/template.js';
 
 // Vertical-slice defaults — move to per-tier resource_tiers columns once that
@@ -177,6 +178,22 @@ async function reapStalePendingRows(log: FastifyBaseLogger) {
   }
 }
 
+// Host iptables rules (docker/firewall.ts) are populated straight into
+// netfilter, not persisted by Docker itself — a host reboot wipes them.
+// Reapplying idempotently every sweep (ensureInstanceFirewall no-ops once a
+// rule is already present — confirmed via -C during development) means a
+// reboot self-heals within one SWEEP_INTERVAL_MS instead of needing a
+// separate host-side systemd unit to reinstall them.
+async function ensureFirewallRules(log: FastifyBaseLogger) {
+  const networks = await docker.listNetworks();
+  for (const network of networks) {
+    if (!network.Name?.startsWith('sbx-') || !network.Name.endsWith('-net')) continue;
+    await ensureInstanceFirewall(network.Id).catch((err) => {
+      log.error({ err, network: network.Name }, 'failed to (re)apply instance firewall rules');
+    });
+  }
+}
+
 // Crashed creates (or a killed reconciler mid-teardown) can leave a
 // `sbx-<id>-net` network behind with nothing attached — these silently eat
 // the address-pool budget (see plan's address-pool note) until reaped.
@@ -189,6 +206,14 @@ async function reapOrphanNetworks(log: FastifyBaseLogger) {
     if (hasContainers) continue;
 
     log.info({ network: network.Name }, 'removing orphaned sandbox network');
+    // This bypasses template.ts's leaveSelfAndRemoveNetwork (self was never
+    // joined to an orphan with no containers), so firewall cleanup has to
+    // happen here explicitly — otherwise ensureFirewallRules re-adds these
+    // rules every sweep just before this function deletes the network out
+    // from under them, leaking 5 permanent rules per orphan, forever.
+    await removeInstanceFirewall(network.Id).catch((err) => {
+      log.warn({ err, network: network.Name }, 'failed to remove firewall rules for orphaned network');
+    });
     await docker.getNetwork(network.Id).remove().catch((err) => {
       log.warn({ err, network: network.Name }, 'failed to remove orphaned network');
     });
@@ -205,6 +230,7 @@ export function startReconciler(log: FastifyBaseLogger): () => void {
       await probeReadiness(log);
       await reapIdleAndExpired(log);
       await reapStalePendingRows(log);
+      await ensureFirewallRules(log);
       await reapOrphanNetworks(log);
     } catch (err) {
       log.error({ err }, 'reconciler sweep failed');

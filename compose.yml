@@ -17,7 +17,12 @@
 #      calls the raw Docker API, which 404s on a missing image the way
 #      `docker run` never does.
 #      docker pull dockurr/windows@sha256:743847e75b776790c059f33ac6654f84727ba36a6d458a61e37cb2b2f043d168
-#   4. Copy .env.example to .env and fill it in.
+#   4. Build the firewall helper image (webui/src/docker/firewall.ts spawns
+#      this via the Docker socket to apply host iptables rules per instance —
+#      it's never fetched automatically either, and there's no registry to
+#      pull it from since it's built locally):
+#      docker build -t sandbox-firewall-helper:latest ./webui/firewall-helper
+#   5. Copy .env.example to .env and fill it in.
 #
 # Port 8080 is bound to loopback only. Put a TLS-terminating reverse proxy
 # (Caddy, nginx, etc.) in front on 443 and point it at 127.0.0.1:8080 —

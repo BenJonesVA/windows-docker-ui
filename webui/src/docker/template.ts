@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type Docker from 'dockerode';
 import { docker } from './client.js';
+import { ensureInstanceFirewall, removeInstanceFirewall } from './firewall.js';
 import type { CreateInstanceInput } from './validators.js';
 
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
@@ -86,12 +87,16 @@ export async function ensureVolume(volumeName: string): Promise<void> {
 // per-instance model exhausts that almost immediately (confirmed
 // empirically: creation started failing at the 30th network). See the plan's
 // Local Dev Environment section for the daemon.json change this required.
-async function createInstanceNetwork(instanceId: string): Promise<string> {
+async function createInstanceNetwork(instanceId: string): Promise<{ name: string; id: string }> {
   const netName = networkNameFor(instanceId);
   await docker.createNetwork({ Name: netName, Driver: 'bridge' }).catch((err: any) => {
     if (err.statusCode !== 409) throw err;
   });
-  return netName;
+  // Fetch the Id regardless of whether this call just created the network or
+  // hit the 409-already-exists path (a retried create) — either way we need
+  // it to derive the bridge interface name for firewall.ts.
+  const { Id } = await docker.getNetwork(netName).inspect();
+  return { name: netName, id: Id };
 }
 
 async function joinSelfToNetwork(netName: string): Promise<void> {
@@ -109,6 +114,16 @@ async function joinSelfToNetwork(netName: string): Promise<void> {
 
 async function leaveSelfAndRemoveNetwork(netName: string): Promise<void> {
   const network = docker.getNetwork(netName);
+  // Firewall rules are keyed by network Id (see firewall.ts), so fetch it
+  // before the network itself is gone — inspect() 404s if a previous crashed
+  // teardown already removed it, in which case the rules are moot too.
+  const info = await network.inspect().catch((err: any) => {
+    if (err.statusCode === 404) return null;
+    throw err;
+  });
+  if (info) {
+    await removeInstanceFirewall(info.Id);
+  }
   await network
     .disconnect({ Container: SELF_CONTAINER_NAME, Force: true })
     .catch((err: any) => {
@@ -124,7 +139,12 @@ export async function createInstanceContainer(
   input: CreateInstanceInput,
 ): Promise<{ containerId: string; accountPassword: string }> {
   await ensureVolume(target.volumeName);
-  const netName = await createInstanceNetwork(target.id);
+  const network = await createInstanceNetwork(target.id);
+  const netName = network.name;
+  // Applied before the container is even created — the bridge interface
+  // exists as soon as the network does, so this closes the window rather
+  // than leaving it open until the next reconciler sweep.
+  await ensureInstanceFirewall(network.id);
 
   const accountPassword = randomBytes(18).toString('base64url');
 
