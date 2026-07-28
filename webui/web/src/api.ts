@@ -43,6 +43,7 @@ export interface SandboxInstance {
   containerName: string;
   containerState: 'pending' | 'created' | 'running' | 'exited' | 'error';
   phase: 'installing' | 'ready' | 'failed';
+  egressBlocked: boolean;
   accountPassword: string | null;
   createdAt: number;
   startedAt: number | null;
@@ -67,6 +68,11 @@ export const api = {
   getInstance: (id: string) => request<SandboxInstance>(`/api/instances/${id}`),
   startInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/start`, { method: 'POST' }),
   stopInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/stop`, { method: 'POST' }),
+  setEgressBlocked: (id: string, blocked: boolean) =>
+    request<{ ok: true; egressBlocked: boolean }>(`/api/instances/${id}/egress`, {
+      method: 'POST',
+      body: JSON.stringify({ blocked }),
+    }),
   deleteInstance: (id: string, retainDisk: boolean) =>
     request<{ ok: true }>(`/api/instances/${id}?retain_disk=${retainDisk}`, { method: 'DELETE' }),
   openViewer: (id: string) =>

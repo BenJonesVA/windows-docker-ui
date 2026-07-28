@@ -1,5 +1,7 @@
 # Sandbox Console
 
+### This is a work in progress and in no way should be used in any sort of production environment.  I'll let you know when it gets to that point!
+
 A self-hosted manager for disposable Windows VMs running in Docker. Sign in, click
 "Create instance," and get an isolated Windows desktop in your browser a few
 minutes later — no local hypervisor, no manual QEMU flags.

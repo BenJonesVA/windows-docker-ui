@@ -13,6 +13,7 @@ export function InstanceDetail() {
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [egressBusy, setEgressBusy] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
 
   async function refresh() {

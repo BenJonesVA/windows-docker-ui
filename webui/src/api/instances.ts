@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { and, eq } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../db/client.js';
 import { sandboxInstances } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
+import { docker } from '../docker/client.js';
+import { ensureInstanceFirewall } from '../docker/firewall.js';
 import {
   createInstanceSchema,
   ALLOWED_WINDOWS_VERSIONS,
@@ -22,7 +25,10 @@ import {
   inspectInstanceContainer,
   tailInstanceLogs,
   demuxDockerLogs,
+  networkNameFor,
 } from '../docker/template.js';
+
+const setEgressSchema = z.object({ blocked: z.boolean() });
 
 // Own the mapping from Docker's raw state string to our narrower enum here,
 // rather than trusting arbitrary values into the DB column.
@@ -166,6 +172,40 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       .set({ containerState: 'exited', stoppedAt: Math.floor(Date.now() / 1000) })
       .where(eq(sandboxInstances.id, id));
     return { ok: true };
+  });
+
+  // Live per-instance egress on/off (plan item #23) — distinct from #16's
+  // admin-set per-tier default. Persists the flag unconditionally, then
+  // applies it immediately if the instance's network already exists;
+  // otherwise (still pending/no network yet) the next reconciler sweep
+  // converges it (see reconciler/index.ts ensureFirewallRules), same pattern
+  // as the baseline firewall rules already rely on.
+  fastify.post('/api/instances/:id/egress', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const parsed = setEgressSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
+    }
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    await db
+      .update(sandboxInstances)
+      .set({ egressBlocked: parsed.data.blocked })
+      .where(eq(sandboxInstances.id, id));
+
+    const network = await docker
+      .getNetwork(networkNameFor(id))
+      .inspect()
+      .catch((err: any) => {
+        if (err.statusCode === 404) return null;
+        throw err;
+      });
+    if (network) {
+      await ensureInstanceFirewall(network.Id, { blockEgress: parsed.data.blocked });
+    }
+    return { ok: true, egressBlocked: parsed.data.blocked };
   });
 
   fastify.delete('/api/instances/:id', async (request, reply) => {

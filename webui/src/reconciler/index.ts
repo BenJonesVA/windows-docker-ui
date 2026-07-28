@@ -178,17 +178,38 @@ async function reapStalePendingRows(log: FastifyBaseLogger) {
   }
 }
 
+// Reverse of template.ts's networkNameFor — sliced by fixed prefix/suffix
+// length rather than split('-'), since nanoid ids can themselves contain
+// dashes.
+function instanceIdFromNetworkName(name: string): string {
+  return name.slice('sbx-'.length, -'-net'.length);
+}
+
 // Host iptables rules (docker/firewall.ts) are populated straight into
 // netfilter, not persisted by Docker itself — a host reboot wipes them.
 // Reapplying idempotently every sweep (ensureInstanceFirewall no-ops once a
 // rule is already present — confirmed via -C during development) means a
 // reboot self-heals within one SWEEP_INTERVAL_MS instead of needing a
-// separate host-side systemd unit to reinstall them.
+// separate host-side systemd unit to reinstall them. Also the mechanism that
+// converges each instance's egressBlocked toggle (plan item #23) to its
+// actual firewall state — ensureInstanceFirewall ensures-or-removes the
+// deny-all rule based on the flag, so a toggle that raced a crash/restart
+// still lands within one sweep.
 async function ensureFirewallRules(log: FastifyBaseLogger) {
+  const instances = await db
+    .select({ id: sandboxInstances.id, egressBlocked: sandboxInstances.egressBlocked })
+    .from(sandboxInstances)
+    .where(isNull(sandboxInstances.deletedAt));
+  const egressBlockedById = new Map(instances.map((i) => [i.id, i.egressBlocked]));
+
   const networks = await docker.listNetworks();
   for (const network of networks) {
     if (!network.Name?.startsWith('sbx-') || !network.Name.endsWith('-net')) continue;
-    await ensureInstanceFirewall(network.Id).catch((err) => {
+    const instanceId = instanceIdFromNetworkName(network.Name);
+    // Orphan network (no live DB row) — leave egress open; reapOrphanNetworks
+    // reaps it separately, and there's no stored intent to converge toward.
+    const blockEgress = egressBlockedById.get(instanceId) ?? false;
+    await ensureInstanceFirewall(network.Id, { blockEgress }).catch((err) => {
       log.error({ err, network: network.Name }, 'failed to (re)apply instance firewall rules');
     });
   }
