@@ -7,6 +7,7 @@ import { Login } from './pages/Login';
 import { Setup } from './pages/Setup';
 import { Dashboard } from './pages/Dashboard';
 import { InstanceDetail } from './pages/InstanceDetail';
+import { Admin } from './pages/Admin';
 
 // Suffix of statusMeta's badge className ("vm-badge--running" -> "running")
 // doubles as the nav dot's modifier — one status vocabulary, two renderings.
@@ -117,6 +118,12 @@ export function App() {
               })
             )}
           </div>
+          {me.role === 'admin' && (
+            <button className="vm-nav-item" onClick={() => navigate('/admin')}>
+              <span className="vm-nav-glyph">&#9881;</span>
+              Admin
+            </button>
+          )}
         </div>
         <div className="vm-sidebar-spacer" />
         <div className="vm-sidebar-user">
@@ -151,6 +158,7 @@ export function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/instances/:id" element={<InstanceDetail />} />
+            {me.role === 'admin' && <Route path="/admin" element={<Admin me={me} />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

@@ -7,7 +7,7 @@ import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY, typ
 import { stopInstanceContainer } from '../docker/template.js';
 
 // Vertical-slice defaults — move to per-tier resource_tiers columns once that
-// table exists (plan task #8). Deliberately conservative.
+// table exists (plan item #14). Deliberately conservative.
 const IDLE_TIMEOUT_SECONDS = 30 * 60; // 30 min
 const MAX_LIFETIME_SECONDS = 8 * 60 * 60; // 8 h
 const PENDING_GRACE_SECONDS = 2 * 60; // how long a create is allowed to be mid-flight

@@ -14,8 +14,11 @@ const loginSchema = z.object({
 });
 
 export default async function authRoutes(fastify: FastifyInstance) {
-  // TODO(task #8): replace with admin-invite-only registration. For the
-  // vertical slice, accounts are created via `npm run db:seed` only.
+  // TODO(plan #6, remaining scope): replace with admin-invite-only
+  // registration. For now, the first account comes from the Setup screen
+  // (plan #5, api/setup.ts) and every account after that from
+  // `npm run db:seed` — there's no in-app way for an admin to create or
+  // invite additional users yet.
   fastify.post('/api/auth/login', async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) {

@@ -17,7 +17,7 @@ export const ALLOWED_WINDOWS_VERSIONS = [
 ] as const;
 
 // Bounds are deliberately conservative for a first deployment; make these
-// admin-configurable resource_tiers rows once that table exists (see plan).
+// admin-configurable resource_tiers rows once that table exists (plan item #14).
 export const RAM_MB_MIN = 2048;
 export const RAM_MB_MAX = 8192;
 export const CPU_CORES_MIN = 1;

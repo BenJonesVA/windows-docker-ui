@@ -65,6 +65,18 @@ export interface SandboxInstance {
   stoppedAt: number | null;
 }
 
+export interface AdminUser {
+  id: string;
+  email: string;
+  role: 'user' | 'admin';
+  createdAt: number;
+  disabledAt: number | null;
+}
+
+export interface AdminInstance extends SandboxInstance {
+  ownerEmail: string;
+}
+
 export const api = {
   login: (email: string, password: string) =>
     request<Me>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
@@ -101,4 +113,9 @@ export const api = {
   openViewer: (id: string) =>
     request<{ ok: true; viewerUrl: string }>(`/api/instances/${id}/viewer-session`, { method: 'POST' }),
   getStats: (id: string) => request<InstanceStats>(`/api/instances/${id}/stats`),
+
+  listAdminUsers: () => request<AdminUser[]>('/api/admin/users'),
+  disableAdminUser: (id: string) => request<{ ok: true }>(`/api/admin/users/${id}/disable`, { method: 'POST' }),
+  enableAdminUser: (id: string) => request<{ ok: true }>(`/api/admin/users/${id}/enable`, { method: 'POST' }),
+  listAdminInstances: () => request<AdminInstance[]>('/api/admin/instances'),
 };

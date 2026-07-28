@@ -3,8 +3,10 @@ import { db } from './client.js';
 import { users } from './schema.js';
 import { hashPassword } from '../auth/password.js';
 
-// Vertical-slice stand-in for the real admin-invite-only flow (plan §Auth,
-// task #8). Usage: SEED_EMAIL=... SEED_PASSWORD=... npm run db:seed
+// Stand-in for the real admin-invite-only flow (remaining plan #6 scope) —
+// useful for scripted/non-interactive deploys. The interactive path for a
+// fresh deploy's very first admin is the Setup screen instead (plan #5,
+// api/setup.ts). Usage: SEED_EMAIL=... SEED_PASSWORD=... npm run db:seed
 const email = process.env.SEED_EMAIL;
 const password = process.env.SEED_PASSWORD;
 if (!email || !password) {

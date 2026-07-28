@@ -5,6 +5,7 @@ import authContext from './plugins/auth-context.js';
 import authRoutes from './api/auth.js';
 import setupRoutes from './api/setup.js';
 import instanceRoutes from './api/instances.js';
+import adminRoutes from './api/admin.js';
 import proxyRoutes from './proxy/viewer.js';
 import staticRoutes from './plugins/static.js';
 import { docker } from './docker/client.js';
@@ -39,6 +40,7 @@ await app.register(authContext);
 await app.register(authRoutes);
 await app.register(setupRoutes);
 await app.register(instanceRoutes);
+await app.register(adminRoutes);
 await app.register(proxyRoutes);
 await app.register(staticRoutes);
 

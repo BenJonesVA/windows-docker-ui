@@ -13,8 +13,9 @@ const setupSchema = z.object({
 });
 
 // Plan item #5 — first-boot admin bootstrap. Distinct from an eventual
-// admin-invite flow for adding MORE accounts later (see the "task #8" TODO
-// in api/auth.ts) — this route only ever does one thing: get a fresh deploy
+// admin-invite flow for adding MORE accounts later (remaining plan #6 scope,
+// see the TODO in api/auth.ts) — this route only ever does one thing: get a
+// fresh deploy
 // from zero users to one admin, replacing the manual `npm run db:seed` step.
 export default async function setupRoutes(fastify: FastifyInstance) {
   fastify.get('/api/setup/status', async () => {

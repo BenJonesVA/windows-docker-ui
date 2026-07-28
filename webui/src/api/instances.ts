@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { sandboxInstances, type SandboxInstance } from '../db/schema.js';
+import { sandboxInstances } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
+import { serializeInstance } from './serialize.js';
 import { docker } from '../docker/client.js';
 import { ensureInstanceFirewall } from '../docker/firewall.js';
 import {
@@ -30,21 +31,6 @@ import {
   IMAGE_REF,
   getInstanceStats,
 } from '../docker/template.js';
-
-// egress_allowlist is stored as a JSON string (see db/schema.ts) — parse it
-// before it ever reaches a client, so every response gives callers a real
-// array instead of a string they'd have to know to JSON.parse themselves.
-function serializeInstance(row: SandboxInstance) {
-  let egressAllowlist: string[] = [];
-  try {
-    egressAllowlist = JSON.parse(row.egressAllowlist);
-  } catch {
-    // Malformed stored value — surface as empty rather than throwing a 500
-    // on every read; reconciler/index.ts's ensureFirewallRules logs this
-    // same condition loudly on the enforcement side.
-  }
-  return { ...row, egressAllowlist };
-}
 
 // Own the mapping from Docker's raw state string to our narrower enum here,
 // rather than trusting arbitrary values into the DB column.
