@@ -31,6 +31,14 @@ export interface InstanceMeta {
   ramMaxMb: number;
   cpuMinCores: number;
   cpuMaxCores: number;
+  baseImage: string;
+}
+
+export interface RetainedVolume {
+  instanceId: string;
+  name: string;
+  volumeName: string;
+  deletedAt: number;
 }
 
 export interface SandboxInstance {
@@ -78,6 +86,9 @@ export const api = {
     }),
   deleteInstance: (id: string, retainDisk: boolean) =>
     request<{ ok: true }>(`/api/instances/${id}?retain_disk=${retainDisk}`, { method: 'DELETE' }),
+  listRetainedVolumes: () => request<RetainedVolume[]>('/api/instances/retained-volumes'),
+  purgeRetainedVolume: (instanceId: string) =>
+    request<{ ok: true }>(`/api/instances/${instanceId}/volume`, { method: 'DELETE' }),
   openViewer: (id: string) =>
     request<{ ok: true; viewerUrl: string }>(`/api/instances/${id}/viewer-session`, { method: 'POST' }),
 };

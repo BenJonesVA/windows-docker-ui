@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { api, type SandboxInstance, type InstanceMeta } from '../api';
+import { api, type SandboxInstance, type InstanceMeta, type RetainedVolume } from '../api';
 import { CreateInstanceDrawer } from '../components/CreateInstanceDrawer';
 import { filterKey, formatMb, humanDuration, statusMeta, versionLabel, type FilterKey } from '../status';
 
@@ -37,6 +37,9 @@ export function Dashboard() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  const [retainedVolumes, setRetainedVolumes] = useState<RetainedVolume[]>([]);
+  const [purgingId, setPurgingId] = useState<string | null>(null);
+  const [showRetained, setShowRetained] = useState(false);
 
   async function refresh() {
     try {
@@ -45,6 +48,15 @@ export function Dashboard() {
       setBannerError(err instanceof Error ? err.message : 'Failed to load instances');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function refreshRetainedVolumes() {
+    try {
+      setRetainedVolumes(await api.listRetainedVolumes());
+    } catch {
+      // Housekeeping panel is secondary — a transient failure here shouldn't
+      // block the main instance list from rendering.
     }
   }
 
@@ -57,6 +69,23 @@ export function Dashboard() {
     const interval = setInterval(refresh, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    refreshRetainedVolumes();
+  }, []);
+
+  async function purgeVolume(volume: RetainedVolume) {
+    setPurgingId(volume.instanceId);
+    setBannerError(null);
+    try {
+      await api.purgeRetainedVolume(volume.instanceId);
+      await refreshRetainedVolumes();
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : 'Failed to remove disk');
+    } finally {
+      setPurgingId(null);
+    }
+  }
 
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { all: instances.length, running: 0, installing: 0, stopped: 0, error: 0 };
@@ -328,6 +357,52 @@ export function Dashboard() {
           </button>
         </div>
       )}
+
+      <div style={{ marginTop: 20 }}>
+        <button
+          className="vm-btn vm-btn--ghost vm-btn--sm"
+          style={{ padding: 0, color: 'var(--fg3)' }}
+          onClick={() => setShowRetained((v) => !v)}
+        >
+          {showRetained ? '▾' : '▸'} Retained disks{retainedVolumes.length > 0 ? ` (${retainedVolumes.length})` : ''}
+        </button>
+        {showRetained && (
+          <div className="vm-panel" style={{ marginTop: 8 }}>
+            <div style={{ padding: '8px 11px', fontSize: 12, color: 'var(--fg2)' }}>
+              Disks kept from deleted instances (via "retain disk" on delete). These consume storage but aren't attached
+              to anything — permanently remove them here to reclaim the space.
+            </div>
+            {retainedVolumes.length === 0 ? (
+              <div style={{ padding: '4px 11px 11px', fontSize: 12, color: 'var(--fg3)' }}>None.</div>
+            ) : (
+              <div style={{ padding: '0 11px 9px' }}>
+                {retainedVolumes.map((v) => (
+                  <div className="vm-spec-row" key={v.instanceId}>
+                    <span className="vm-spec-k">{v.name}</span>
+                    <span className="vm-spec-v" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="vm-mono-dim" style={{ fontSize: 11 }}>
+                        deleted {new Date(v.deletedAt * 1000).toLocaleDateString()}
+                      </span>
+                      <button
+                        className="vm-btn vm-btn--ghost vm-btn--sm"
+                        disabled={purgingId === v.instanceId}
+                        onClick={() => purgeVolume(v)}
+                      >
+                        Delete disk
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {meta && (
+          <div className="vm-mono-dim" style={{ fontSize: 10.5, marginTop: 10 }}>
+            Base image: {meta.baseImage}
+          </div>
+        )}
+      </div>
 
       {showCreate && meta && (
         <CreateInstanceDrawer

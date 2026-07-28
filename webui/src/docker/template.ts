@@ -7,7 +7,7 @@ import type { CreateInstanceInput } from './validators.js';
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
 // dockurr/windows` when intentionally bumping the base image; never let this
 // float automatically.
-const IMAGE_REF =
+export const IMAGE_REF =
   process.env.SANDBOX_IMAGE_REF ??
   'dockurr/windows@sha256:743847e75b776790c059f33ac6654f84727ba36a6d458a61e37cb2b2f043d168';
 

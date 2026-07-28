@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNotNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { sandboxInstances, type SandboxInstance } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
@@ -27,6 +27,7 @@ import {
   tailInstanceLogs,
   demuxDockerLogs,
   networkNameFor,
+  IMAGE_REF,
 } from '../docker/template.js';
 
 // egress_allowlist is stored as a JSON string (see db/schema.ts) — parse it
@@ -83,7 +84,68 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     ramMaxMb: RAM_MB_MAX,
     cpuMinCores: CPU_CORES_MIN,
     cpuMaxCores: CPU_CORES_MAX,
+    // Plan item #19 — the pinned base image is the one piece of "OS image"
+    // this app actually controls (dockur/windows fetches the Windows ISO
+    // itself at first boot; this project has no hook into that, so there's
+    // nothing to list/remove there).
+    baseImage: IMAGE_REF,
   }));
+
+  // Plan item #19 — soft-deleted instances (DELETE /api/instances/:id with
+  // retain_disk=true) leave their Docker volume behind with no way to see or
+  // reclaim it afterward: the instance row still exists (deletedAt set) but
+  // nothing in the UI ever queries deleted rows again. Filters to volumes
+  // that still actually exist — a row whose volume was already removed
+  // (retain_disk=false, or a later manual cleanup) shouldn't linger in this
+  // list forever.
+  fastify.get('/api/instances/retained-volumes', async (request) => {
+    const owner = request.currentUser!;
+    const rows = await db
+      .select()
+      .from(sandboxInstances)
+      .where(and(eq(sandboxInstances.ownerId, owner.id), isNotNull(sandboxInstances.deletedAt)));
+
+    const retained = await Promise.all(
+      rows.map(async (row) => {
+        const exists = await docker
+          .getVolume(row.volumeName)
+          .inspect()
+          .then(() => true)
+          .catch((err: any) => {
+            if (err.statusCode === 404) return false;
+            throw err;
+          });
+        return exists ? { instanceId: row.id, name: row.name, volumeName: row.volumeName, deletedAt: row.deletedAt } : null;
+      }),
+    );
+    return retained.filter(Boolean);
+  });
+
+  // Permanently removes a retained disk. Scoped to the owner's own
+  // soft-deleted rows only — getOwnedInstance doesn't filter on deletedAt,
+  // so this works whether or not the row was already soft-deleted, but
+  // there's no route that exposes this for a LIVE instance (that path is
+  // DELETE /api/instances/:id's own retain_disk=false option instead).
+  // Already-gone is treated as success, not an error — the whole point of
+  // this route is "make sure this volume doesn't exist," and it doesn't
+  // matter whether that was already true.
+  fastify.delete('/api/instances/:id/volume', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+    if (!instance.deletedAt) {
+      return reply.code(409).send({ error: 'instance is not deleted — use DELETE /api/instances/:id first' });
+    }
+
+    await docker
+      .getVolume(instance.volumeName)
+      .remove()
+      .catch((err: any) => {
+        if (err.statusCode !== 404) throw err;
+      });
+    return { ok: true };
+  });
 
   fastify.get('/api/instances', async (request) => {
     const owner = request.currentUser!;
