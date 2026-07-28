@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api, type SandboxInstance } from '../api';
+import { api, type SandboxInstance, type InstanceStats } from '../api';
 import { formatMb, humanDuration, mmss, statusMeta, versionLabel } from '../status';
 import { useInstanceLogs } from '../useInstanceLogs';
 
@@ -20,6 +20,7 @@ export function InstanceDetail() {
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameBusy, setNameBusy] = useState(false);
+  const [stats, setStats] = useState<InstanceStats | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
 
   async function refresh() {
@@ -37,6 +38,33 @@ export function InstanceDetail() {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Hooks can't be declared after the `if (!instance) return` below, so this
+  // reads instance.containerState directly rather than the `running` const
+  // computed further down.
+  const runningNow = instance?.containerState === 'running';
+  useEffect(() => {
+    if (!id || !runningNow) {
+      setStats(null);
+      return;
+    }
+    let cancelled = false;
+    async function poll() {
+      try {
+        const s = await api.getStats(id!);
+        if (!cancelled) setStats(s);
+      } catch {
+        // Transient read failure — keep the last known value rather than
+        // flashing the panel blank every time one poll fails.
+      }
+    }
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [id, runningNow]);
 
   // Reset the draft on navigation to a different instance...
   useEffect(() => {
@@ -335,6 +363,51 @@ export function InstanceDetail() {
               ))}
             </div>
           </div>
+          {running && (
+            <div className="vm-panel">
+              <div className="vm-panel-head">Live usage</div>
+              <div style={{ padding: '9px 11px 11px', display: 'grid', gap: 10 }}>
+                {!stats ? (
+                  <div style={{ fontSize: 12, color: 'var(--fg3)' }}>Reading…</div>
+                ) : (
+                  <>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginBottom: 3 }}>
+                        <span className="vm-spec-k">CPU</span>
+                        <span className="vm-mono-dim">{stats.cpuPercent.toFixed(1)}%</span>
+                      </div>
+                      <div style={{ height: 5, borderRadius: 3, background: 'var(--line2)', overflow: 'hidden' }}>
+                        <div
+                          style={{
+                            height: '100%',
+                            width: `${Math.min(100, stats.cpuPercent)}%`,
+                            background: 'var(--accent)',
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginBottom: 3 }}>
+                        <span className="vm-spec-k">Memory</span>
+                        <span className="vm-mono-dim">
+                          {formatMb(Math.round(stats.memUsageBytes / 1024 / 1024))} / {formatMb(Math.round(stats.memLimitBytes / 1024 / 1024))}
+                        </span>
+                      </div>
+                      <div style={{ height: 5, borderRadius: 3, background: 'var(--line2)', overflow: 'hidden' }}>
+                        <div
+                          style={{
+                            height: '100%',
+                            width: `${stats.memLimitBytes > 0 ? Math.min(100, (stats.memUsageBytes / stats.memLimitBytes) * 100) : 0}%`,
+                            background: 'var(--accent)',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           <div className="vm-panel">
             <div className="vm-panel-head">Access</div>
             <div className="vm-panel-body" style={{ display: 'grid', gap: 9 }}>

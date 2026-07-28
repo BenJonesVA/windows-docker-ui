@@ -41,6 +41,12 @@ export interface RetainedVolume {
   deletedAt: number;
 }
 
+export interface InstanceStats {
+  cpuPercent: number;
+  memUsageBytes: number;
+  memLimitBytes: number;
+}
+
 export interface SandboxInstance {
   id: string;
   name: string;
@@ -91,4 +97,5 @@ export const api = {
     request<{ ok: true }>(`/api/instances/${instanceId}/volume`, { method: 'DELETE' }),
   openViewer: (id: string) =>
     request<{ ok: true; viewerUrl: string }>(`/api/instances/${id}/viewer-session`, { method: 'POST' }),
+  getStats: (id: string) => request<InstanceStats>(`/api/instances/${id}/stats`),
 };

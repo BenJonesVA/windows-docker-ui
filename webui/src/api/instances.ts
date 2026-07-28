@@ -28,6 +28,7 @@ import {
   demuxDockerLogs,
   networkNameFor,
   IMAGE_REF,
+  getInstanceStats,
 } from '../docker/template.js';
 
 // egress_allowlist is stored as a JSON string (see db/schema.ts) — parse it
@@ -344,6 +345,27 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     const info = await inspectInstanceContainer(instance.containerId).catch(() => null);
     const containerState = mapContainerState(info?.State?.Status);
     return { containerState, phase: instance.phase, dockerState: info?.State };
+  });
+
+  // Plan item #12 — live CPU/memory usage. 409 rather than zeros when not
+  // running: Docker's stats endpoint has nothing meaningful to report for a
+  // stopped container, and a caller silently getting "0% / 0 bytes" back
+  // would be indistinguishable from a genuinely idle-but-running instance.
+  fastify.get('/api/instances/:id/stats', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+    if (!instance.containerId || instance.containerState !== 'running') {
+      return reply.code(409).send({ error: 'instance is not running' });
+    }
+
+    const stats = await getInstanceStats(instance.containerId).catch((err) => {
+      request.log.error({ err, instanceId: id }, 'failed to read container stats');
+      return null;
+    });
+    if (!stats) return reply.code(502).send({ error: 'failed to read container stats' });
+    return stats;
   });
 
   // SSE tail of container logs — the only install-progress signal available,

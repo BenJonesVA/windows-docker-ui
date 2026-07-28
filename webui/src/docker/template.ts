@@ -238,6 +238,38 @@ export async function inspectInstanceContainer(containerId: string) {
   return docker.getContainer(containerId).inspect();
 }
 
+export interface InstanceStats {
+  cpuPercent: number;
+  memUsageBytes: number;
+  memLimitBytes: number;
+}
+
+// Plan item #12 — no new instrumentation needed, Docker already tracks this
+// per container. `stats({ stream: false })` isn't a single instantaneous
+// sample despite the name: dockerd takes two samples ~1s apart internally
+// and returns both (cpu_stats + precpu_stats), which is what makes the
+// standard delta formula below meaningful rather than divide-by-zero on a
+// single snapshot.
+//
+// Deliberately doesn't report disk usage — the guest's actual disk lives in
+// a bind-mounted volume (`Binds: ["<volume>:/storage"]`, createInstanceContainer
+// above), not the container's own writable layer, so `docker inspect --size`
+// wouldn't reflect it. Getting real volume usage means inspecting the mount
+// on the host (e.g. a `du` via a helper container, same pattern as
+// firewall.ts) — out of scope for this pass.
+export async function getInstanceStats(containerId: string): Promise<InstanceStats> {
+  const stats: any = await docker.getContainer(containerId).stats({ stream: false });
+  const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
+  const systemDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
+  const numCpus = stats.cpu_stats.online_cpus ?? stats.cpu_stats.cpu_usage.percpu_usage?.length ?? 1;
+  const cpuPercent = systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * numCpus * 100 : 0;
+  return {
+    cpuPercent,
+    memUsageBytes: stats.memory_stats?.usage ?? 0,
+    memLimitBytes: stats.memory_stats?.limit ?? 0,
+  };
+}
+
 export async function tailInstanceLogs(containerId: string, sinceSeconds = 60) {
   return docker.getContainer(containerId).logs({
     stdout: true,
