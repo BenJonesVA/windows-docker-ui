@@ -68,6 +68,20 @@ export function InstanceDetail() {
     }
   }
 
+  async function toggleEgress() {
+    if (!id || !instance) return;
+    setEgressBusy(true);
+    setError(null);
+    try {
+      await api.setEgressBlocked(id, !instance.egressBlocked);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update egress');
+    } finally {
+      setEgressBusy(false);
+    }
+  }
+
   if (!instance) return <div className="vm-page">Loading…</div>;
 
   const m = statusMeta(instance);
@@ -247,6 +261,26 @@ export function InstanceDetail() {
                 Clipboard passthrough is enabled between your browser and the guest. File transfer and RDP are not exposed —
                 the viewer is the only path in.
               </div>
+              <div className="vm-spec-row">
+                <span className="vm-spec-k">Internet access</span>
+                <span className="vm-spec-v" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {instance.egressBlocked ? 'Blocked' : 'Allowed'}
+                  <button
+                    className="vm-btn vm-btn--ghost vm-btn--sm"
+                    disabled={egressBusy || installing}
+                    title={installing ? 'Blocking egress during install would hang the Windows ISO fetch' : undefined}
+                    onClick={toggleEgress}
+                  >
+                    {instance.egressBlocked ? 'Unblock' : 'Block'}
+                  </button>
+                </span>
+              </div>
+              {instance.egressBlocked && (
+                <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                  All outbound network traffic from this instance is cut off. The viewer connection (browser to this
+                  instance, through the webui's own proxy) is unaffected.
+                </div>
+              )}
               {instance.accountPassword && (
                 <>
                   <div className="vm-spec-row">
