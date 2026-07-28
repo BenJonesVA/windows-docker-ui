@@ -64,6 +64,16 @@ async function removeRule(chain: string, ruleArgs: string[]): Promise<void> {
   }
 }
 
+// Same `! -o <this bridge>` scoping as the RFC1918 rules below — same-bridge
+// traffic (the webui<->sandbox proxy path) must survive even when an
+// instance's egress is fully cut, or this repeats the rejected shared-bridge
+// icc=false design (see template.ts's network-model comment). Ordering vs.
+// the RFC1918 rules doesn't matter: all of them terminate in DROP, and
+// iptables stops at the first match either way.
+function denyAllRuleArgs(iface: string): string[] {
+  return ['-i', iface, '!', '-o', iface, '-j', 'DROP'];
+}
+
 // Two distinct gaps closed here (plan item #1):
 //
 // 1. Sandbox container -> host. Traffic a container sends to its own bridge
@@ -81,18 +91,42 @@ async function removeRule(chain: string, ruleArgs: string[]): Promise<void> {
 //    same-bridge-in/same-bridge-out traffic, is untouched — a shared-bridge
 //    icc=false rule blocking exactly this path is what got rejected in
 //    template.ts's network design; this rule must not repeat that mistake.
-export async function ensureInstanceFirewall(networkId: string): Promise<void> {
+//
+// `blockEgress` (plan item #23) layers a live, per-instance deny-all on top
+// of the baseline above — a user/admin cutting an instance off from the
+// internet entirely (e.g. after installing untrusted software) without
+// tearing the instance down. Ensures-or-removes based on the flag every call,
+// so the reconciler's per-sweep reapply (reconciler/index.ts
+// ensureFirewallRules) converges to the stored DB state even if a prior
+// toggle call crashed mid-flight.
+export async function ensureInstanceFirewall(
+  networkId: string,
+  opts: { blockEgress: boolean } = { blockEgress: false },
+): Promise<void> {
   const iface = bridgeInterfaceName(networkId);
   await ensureRule('INPUT', ['-i', iface, '-j', 'DROP']);
   for (const cidr of BLOCKED_EGRESS_CIDRS) {
     await ensureRule('DOCKER-USER', ['-i', iface, '!', '-o', iface, '-d', cidr, '-j', 'DROP']);
   }
+  if (opts.blockEgress) {
+    await ensureRule('DOCKER-USER', denyAllRuleArgs(iface));
+  } else {
+    await removeRule('DOCKER-USER', denyAllRuleArgs(iface));
+  }
 }
 
+// Unconditionally removes the deny-all rule too, regardless of the instance's
+// stored egressBlocked flag — removeRule is a no-op (via -C) when the rule
+// isn't present, so this is free. Every caller of this function (instance
+// teardown in template.ts, orphan-network cleanup in reconciler/index.ts) is
+// deleting the network right after, so there is no "reapply next sweep" to
+// fall back on; skipping this leaks a permanent DOCKER-USER rule per
+// deleted network that was ever egress-blocked.
 export async function removeInstanceFirewall(networkId: string): Promise<void> {
   const iface = bridgeInterfaceName(networkId);
   await removeRule('INPUT', ['-i', iface, '-j', 'DROP']);
   for (const cidr of BLOCKED_EGRESS_CIDRS) {
     await removeRule('DOCKER-USER', ['-i', iface, '!', '-o', iface, '-d', cidr, '-j', 'DROP']);
   }
+  await removeRule('DOCKER-USER', denyAllRuleArgs(iface));
 }

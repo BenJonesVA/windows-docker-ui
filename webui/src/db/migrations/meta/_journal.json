@@ -15,6 +15,13 @@
       "when": 1785240057791,
       "tag": "0001_clumsy_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785269601816,
+      "tag": "0002_workable_exodus",
+      "breakpoints": true
     }
   ]
 }

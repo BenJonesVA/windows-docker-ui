@@ -48,6 +48,12 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   phase: text('phase', { enum: ['installing', 'ready', 'failed'] })
     .notNull()
     .default('installing'),
+  // User/admin-triggered live override (plan item #23) — distinct from #16's
+  // admin-set per-tier default policy. Reconciler treats this as the source
+  // of truth every sweep (see reconciler/index.ts ensureFirewallRules), so
+  // toggling it back off self-heals even if the API call that flipped it
+  // crashes mid-flight.
+  egressBlocked: integer('egress_blocked', { mode: 'boolean' }).notNull().default(false),
 
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   startedAt: integer('started_at'),

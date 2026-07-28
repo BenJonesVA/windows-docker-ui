@@ -1,18 +1,4 @@
-1. Software firewall to prevent VM to host comm and possibilty vm to vm com
-2. Way to monitor network traffic - Remnux option?
-3. Wireshark integration with VMs?
-4. Improve UI and add admin functions
-5. Upon deployment, there should be an admin credential setup screen
-6. Admin panel to manage users, resources, settings, options for memory, cpu, hard drive availability
-7. When listing the instances, if you hover over the instance, it should show a screenshot of the OS
-8. Copy and paste from client to sandbox os
-9. Ability to upload a file to the OS through the browser
-10. Show OS images that are downloaded in the UI and ability to remove them
-11. Evaluate anything we're missing that would fit in the project
-12. Resource monitor for the sandbox OS in the UI
-13. Possible to pull and record process executions, network traffic and other metrics in the UI (?)
 
----
 
 ## Evaluation (2026-07-28)
 

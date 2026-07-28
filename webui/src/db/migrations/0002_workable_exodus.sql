@@ -1,0 +1,1 @@
+ALTER TABLE `sandbox_instances` ADD `egress_blocked` integer DEFAULT false NOT NULL;

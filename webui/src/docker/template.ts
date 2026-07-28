@@ -143,8 +143,10 @@ export async function createInstanceContainer(
   const netName = network.name;
   // Applied before the container is even created — the bridge interface
   // exists as soon as the network does, so this closes the window rather
-  // than leaving it open until the next reconciler sweep.
-  await ensureInstanceFirewall(network.id);
+  // than leaving it open until the next reconciler sweep. New instances
+  // always start with egress open (plan item #23 is an opt-in toggle a user
+  // flips after create, not a create-time setting).
+  await ensureInstanceFirewall(network.id, { blockEgress: false });
 
   const accountPassword = randomBytes(18).toString('base64url');
 
