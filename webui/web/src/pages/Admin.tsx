@@ -10,6 +10,9 @@ const TIER_FIELDS: Array<{ key: keyof Omit<ResourceTier, 'id' | 'name'>; label: 
   { key: 'diskGbMax', label: 'Disk max (GB)' },
   { key: 'idleTimeoutSeconds', label: 'Idle timeout (seconds)' },
   { key: 'maxLifetimeSeconds', label: 'Max lifetime (seconds)' },
+  { key: 'maxConcurrentInstances', label: 'Max concurrent instances / user' },
+  { key: 'maxAggregateRamMb', label: 'Max aggregate RAM / user (MB)' },
+  { key: 'maxAggregateDiskGb', label: 'Max aggregate disk / user (GB)' },
 ];
 
 // Plan item #6 — user management and admin-wide instance visibility, plus
@@ -132,8 +135,9 @@ export function Admin({ me }: { me: Me }) {
         <div className="vm-panel-head">Resource tier</div>
         <div style={{ padding: '9px 11px 11px' }}>
           <div style={{ fontSize: 12, color: 'var(--fg2)', marginBottom: 10 }}>
-            Applies to every new instance's create-time bounds and to the reconciler's idle/lifetime reaping. One tier
-            today — a per-instance/per-user tier picker is future work.
+            Applies to every new instance's create-time bounds, the reconciler's idle/lifetime reaping, and each user's
+            concurrent-instance/aggregate RAM+disk quotas. One tier today — a per-instance/per-user tier picker is
+            future work.
           </div>
           {!tier ? (
             <div style={{ fontSize: 12, color: 'var(--fg3)' }}>Loading…</div>

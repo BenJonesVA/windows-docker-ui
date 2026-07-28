@@ -29,6 +29,21 @@ export const resourceTiers = sqliteTable('resource_tiers', {
   diskGbMax: integer('disk_gb_max').notNull(),
   idleTimeoutSeconds: integer('idle_timeout_seconds').notNull(),
   maxLifetimeSeconds: integer('max_lifetime_seconds').notNull(),
+
+  // Plan item #15 — per-user quotas, sibling to the per-instance bounds
+  // above. A per-instance cap alone doesn't stop resource exhaustion from
+  // many *concurrent* instances owned by one user; enforced at
+  // instance-create time in api/instances.ts by counting/summing that
+  // user's own live (non-deleted) instances against these ceilings.
+  // Defaults here (unlike the columns above) exist so `ALTER TABLE ADD
+  // COLUMN` has something to backfill the already-seeded tier row with on an
+  // upgrading deploy — SQLite requires a DEFAULT for a NOT NULL column added
+  // this way. Matches db/resourceTiers.ts's DEFAULT_TIER; only meaningful for
+  // that backfill, since getActiveTier() only ever inserts a brand-new row
+  // with explicit values, never relying on the column default itself.
+  maxConcurrentInstances: integer('max_concurrent_instances').notNull().default(5),
+  maxAggregateRamMb: integer('max_aggregate_ram_mb').notNull().default(5 * 8192),
+  maxAggregateDiskGb: integer('max_aggregate_disk_gb').notNull().default(5 * 128),
 });
 
 export const sessions = sqliteTable('sessions', {

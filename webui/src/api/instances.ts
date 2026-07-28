@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { sandboxInstances } from '../db/schema.js';
+import { sandboxInstances, type ResourceTier } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
 import { serializeInstance } from './serialize.js';
 import { docker } from '../docker/client.js';
@@ -44,6 +44,36 @@ function mapContainerState(dockerState: string | undefined): 'created' | 'runnin
   }
 }
 
+// Plan item #15 — sibling to the per-instance bounds in
+// docker/validators.ts's buildCreateInstanceSchema: a single instance can be
+// within bounds while a user's Nth *concurrent* one still exhausts the host.
+// "Live" here means not soft-deleted — a stopped-but-undeleted instance
+// still holds its volume (disk) and counts toward "how many instances does
+// this user have", even though it isn't currently running.
+async function checkUserQuota(
+  ownerId: string,
+  tier: ResourceTier,
+  input: { ramMb: number; diskGb: number },
+): Promise<string | null> {
+  const live = await db
+    .select({ ramMb: sandboxInstances.ramMb, diskGb: sandboxInstances.diskGb })
+    .from(sandboxInstances)
+    .where(and(eq(sandboxInstances.ownerId, ownerId), isNull(sandboxInstances.deletedAt)));
+
+  if (live.length >= tier.maxConcurrentInstances) {
+    return `Concurrent instance limit reached (${tier.maxConcurrentInstances}).`;
+  }
+  const currentRamMb = live.reduce((sum, i) => sum + i.ramMb, 0);
+  if (currentRamMb + input.ramMb > tier.maxAggregateRamMb) {
+    return `Aggregate RAM limit would be exceeded (max ${tier.maxAggregateRamMb} MB across all your instances).`;
+  }
+  const currentDiskGb = live.reduce((sum, i) => sum + i.diskGb, 0);
+  if (currentDiskGb + input.diskGb > tier.maxAggregateDiskGb) {
+    return `Aggregate disk limit would be exceeded (max ${tier.maxAggregateDiskGb} GB across all your instances).`;
+  }
+  return null;
+}
+
 async function getOwnedInstance(instanceId: string, ownerId: string) {
   const [instance] = await db
     .select()
@@ -70,6 +100,11 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       ramMaxMb: tier.ramMbMax,
       cpuMinCores: tier.cpuCoresMin,
       cpuMaxCores: tier.cpuCoresMax,
+      // Plan item #15 — surfaced so the create form can explain a 409 in
+      // advance rather than only after a failed submit.
+      maxConcurrentInstances: tier.maxConcurrentInstances,
+      maxAggregateRamMb: tier.maxAggregateRamMb,
+      maxAggregateDiskGb: tier.maxAggregateDiskGb,
       // Plan item #19 — the pinned base image is the one piece of "OS image"
       // this app actually controls (dockur/windows fetches the Windows ISO
       // itself at first boot; this project has no hook into that, so there's
@@ -151,6 +186,12 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
     }
     const input = parsed.data;
+
+    const quotaError = await checkUserQuota(owner.id, tier, input);
+    if (quotaError) {
+      return reply.code(409).send({ error: quotaError });
+    }
+
     const id = nanoid(16);
     const containerName = `sbx-${id}`;
     const volumeName = `sbx-${id}-storage`;

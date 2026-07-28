@@ -88,6 +88,9 @@ export interface ResourceTier {
   diskGbMax: number;
   idleTimeoutSeconds: number;
   maxLifetimeSeconds: number;
+  maxConcurrentInstances: number;
+  maxAggregateRamMb: number;
+  maxAggregateDiskGb: number;
 }
 
 export const api = {
