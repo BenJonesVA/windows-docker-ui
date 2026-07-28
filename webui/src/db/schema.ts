@@ -48,12 +48,25 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   phase: text('phase', { enum: ['installing', 'ready', 'failed'] })
     .notNull()
     .default('installing'),
-  // User/admin-triggered live override (plan item #23) — distinct from #16's
-  // admin-set per-tier default policy. Reconciler treats this as the source
-  // of truth every sweep (see reconciler/index.ts ensureFirewallRules), so
-  // toggling it back off self-heals even if the API call that flipped it
-  // crashes mid-flight.
-  egressBlocked: integer('egress_blocked', { mode: 'boolean' }).notNull().default(false),
+  // Per-instance egress policy (plan item #16, supersedes #23's plain
+  // egress_blocked boolean — 'blocked' is that same case, 'allowlist' is new).
+  // 'open': only the always-on RFC1918/link-local/host-protection rules
+  // apply (today's default). 'blocked': deny all egress. 'allowlist': deny
+  // all egress except DNS and the CIDRs in egress_allowlist. Reconciler
+  // treats these columns as the source of truth every sweep (see
+  // reconciler/index.ts ensureFirewallRules), so a change self-heals even if
+  // the API call that made it crashes mid-flight. This is a live per-instance
+  // override a user/admin triggers themselves — distinct from a future
+  // admin-set default policy per resource tier (plan item #14, not yet
+  // implemented).
+  egressMode: text('egress_mode', { enum: ['open', 'blocked', 'allowlist'] })
+    .notNull()
+    .default('open'),
+  // JSON-encoded array of CIDR strings, meaningful only when egressMode is
+  // 'allowlist'. Stored as text rather than a child table — bounded in size
+  // by the API's own validation (docker/validators.ts), so a relational
+  // table would be overhead without a real query need.
+  egressAllowlist: text('egress_allowlist').notNull().default('[]'),
 
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   startedAt: integer('started_at'),

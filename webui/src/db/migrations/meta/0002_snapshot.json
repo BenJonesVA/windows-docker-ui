@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "adcf5e5c-b05b-4a41-a65a-22c0539773c2",
+  "id": "0ce76445-c311-49a5-9807-6daec0176c26",
   "prevId": "74953ab9-d3d0-4af6-a947-7fe2efe07d81",
   "tables": {
     "sandbox_instances": {
@@ -100,13 +100,21 @@
           "autoincrement": false,
           "default": "'installing'"
         },
-        "egress_blocked": {
-          "name": "egress_blocked",
-          "type": "integer",
+        "egress_mode": {
+          "name": "egress_mode",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": false
+          "default": "'open'"
+        },
+        "egress_allowlist": {
+          "name": "egress_allowlist",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
         },
         "created_at": {
           "name": "created_at",

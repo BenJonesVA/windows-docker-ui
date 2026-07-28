@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { docker } from '../docker/client.js';
 import { db } from '../db/client.js';
 import { sandboxInstances } from '../db/schema.js';
-import { ensureInstanceFirewall, removeInstanceFirewall } from '../docker/firewall.js';
+import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY, type EgressPolicy } from '../docker/firewall.js';
 import { stopInstanceContainer } from '../docker/template.js';
 
 // Vertical-slice defaults — move to per-tier resource_tiers columns once that
@@ -191,16 +191,30 @@ function instanceIdFromNetworkName(name: string): string {
 // rule is already present — confirmed via -C during development) means a
 // reboot self-heals within one SWEEP_INTERVAL_MS instead of needing a
 // separate host-side systemd unit to reinstall them. Also the mechanism that
-// converges each instance's egressBlocked toggle (plan item #23) to its
-// actual firewall state — ensureInstanceFirewall ensures-or-removes the
-// deny-all rule based on the flag, so a toggle that raced a crash/restart
-// still lands within one sweep.
+// converges each instance's egress policy (plan item #16) to its actual
+// firewall state — ensureInstanceFirewall rebuilds the instance's chain to
+// match the stored policy every call, so a policy change that raced a
+// crash/restart still lands within one sweep.
 async function ensureFirewallRules(log: FastifyBaseLogger) {
   const instances = await db
-    .select({ id: sandboxInstances.id, egressBlocked: sandboxInstances.egressBlocked })
+    .select({
+      id: sandboxInstances.id,
+      egressMode: sandboxInstances.egressMode,
+      egressAllowlist: sandboxInstances.egressAllowlist,
+    })
     .from(sandboxInstances)
     .where(isNull(sandboxInstances.deletedAt));
-  const egressBlockedById = new Map(instances.map((i) => [i.id, i.egressBlocked]));
+
+  const policyById = new Map<string, EgressPolicy>();
+  for (const instance of instances) {
+    let allowlist: string[] = [];
+    try {
+      allowlist = JSON.parse(instance.egressAllowlist);
+    } catch (err) {
+      log.error({ err, instanceId: instance.id }, 'invalid egress_allowlist JSON — treating as empty');
+    }
+    policyById.set(instance.id, { mode: instance.egressMode, allowlist });
+  }
 
   const networks = await docker.listNetworks();
   for (const network of networks) {
@@ -208,8 +222,8 @@ async function ensureFirewallRules(log: FastifyBaseLogger) {
     const instanceId = instanceIdFromNetworkName(network.Name);
     // Orphan network (no live DB row) — leave egress open; reapOrphanNetworks
     // reaps it separately, and there's no stored intent to converge toward.
-    const blockEgress = egressBlockedById.get(instanceId) ?? false;
-    await ensureInstanceFirewall(network.Id, { blockEgress }).catch((err) => {
+    const policy = policyById.get(instanceId) ?? OPEN_EGRESS_POLICY;
+    await ensureInstanceFirewall(network.Id, policy).catch((err) => {
       log.error({ err, network: network.Name }, 'failed to (re)apply instance firewall rules');
     });
   }

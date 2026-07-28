@@ -1,14 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { and, eq } from 'drizzle-orm';
-import { z } from 'zod';
 import { db } from '../db/client.js';
-import { sandboxInstances } from '../db/schema.js';
+import { sandboxInstances, type SandboxInstance } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
 import { docker } from '../docker/client.js';
 import { ensureInstanceFirewall } from '../docker/firewall.js';
 import {
   createInstanceSchema,
+  setEgressPolicySchema,
   ALLOWED_WINDOWS_VERSIONS,
   VERSION_DISK_MIN_GB,
   DISK_GB_MAX,
@@ -28,7 +28,20 @@ import {
   networkNameFor,
 } from '../docker/template.js';
 
-const setEgressSchema = z.object({ blocked: z.boolean() });
+// egress_allowlist is stored as a JSON string (see db/schema.ts) — parse it
+// before it ever reaches a client, so every response gives callers a real
+// array instead of a string they'd have to know to JSON.parse themselves.
+function serializeInstance(row: SandboxInstance) {
+  let egressAllowlist: string[] = [];
+  try {
+    egressAllowlist = JSON.parse(row.egressAllowlist);
+  } catch {
+    // Malformed stored value — surface as empty rather than throwing a 500
+    // on every read; reconciler/index.ts's ensureFirewallRules logs this
+    // same condition loudly on the enforcement side.
+  }
+  return { ...row, egressAllowlist };
+}
 
 // Own the mapping from Docker's raw state string to our narrower enum here,
 // rather than trusting arbitrary values into the DB column.
@@ -77,7 +90,7 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       .select()
       .from(sandboxInstances)
       .where(and(eq(sandboxInstances.ownerId, owner.id)));
-    return rows.filter((r) => !r.deletedAt);
+    return rows.filter((r) => !r.deletedAt).map(serializeInstance);
   });
 
   fastify.post('/api/instances', async (request, reply) => {
@@ -133,7 +146,7 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     }
 
     const [final] = await db.select().from(sandboxInstances).where(eq(sandboxInstances.id, id));
-    return reply.code(201).send(final);
+    return reply.code(201).send(serializeInstance(final));
   });
 
   fastify.get('/api/instances/:id', async (request, reply) => {
@@ -141,7 +154,7 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     const { id } = request.params as { id: string };
     const instance = await getOwnedInstance(id, owner.id);
     if (!instance) return reply.code(404).send({ error: 'not found' });
-    return instance;
+    return serializeInstance(instance);
   });
 
   fastify.post('/api/instances/:id/start', async (request, reply) => {
@@ -174,25 +187,31 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     return { ok: true };
   });
 
-  // Live per-instance egress on/off (plan item #23) — distinct from #16's
-  // admin-set per-tier default. Persists the flag unconditionally, then
-  // applies it immediately if the instance's network already exists;
-  // otherwise (still pending/no network yet) the next reconciler sweep
-  // converges it (see reconciler/index.ts ensureFirewallRules), same pattern
-  // as the baseline firewall rules already rely on.
+  // Live per-instance egress policy (plan item #16) — distinct from a future
+  // admin-set per-tier default (plan item #14, not yet implemented).
+  // Persists the policy unconditionally, then applies it immediately if the
+  // instance's network already exists; otherwise (still pending/no network
+  // yet) the next reconciler sweep converges it (see reconciler/index.ts
+  // ensureFirewallRules), same pattern as the baseline firewall rules
+  // already rely on. No phase-gate here (e.g. rejecting 'blocked'/
+  // 'allowlist' while phase === 'installing', which would hang the Windows
+  // ISO fetch) — consistent with every other action route in this file not
+  // phase-gating either; the UI disables the control during install instead
+  // (InstanceDetail.tsx).
   fastify.post('/api/instances/:id/egress', async (request, reply) => {
     const owner = request.currentUser!;
     const { id } = request.params as { id: string };
-    const parsed = setEgressSchema.safeParse(request.body);
+    const parsed = setEgressPolicySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
     }
     const instance = await getOwnedInstance(id, owner.id);
     if (!instance) return reply.code(404).send({ error: 'not found' });
 
+    const allowlist = parsed.data.mode === 'allowlist' ? (parsed.data.allowlist ?? []) : [];
     await db
       .update(sandboxInstances)
-      .set({ egressBlocked: parsed.data.blocked })
+      .set({ egressMode: parsed.data.mode, egressAllowlist: JSON.stringify(allowlist) })
       .where(eq(sandboxInstances.id, id));
 
     const network = await docker
@@ -203,9 +222,9 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
         throw err;
       });
     if (network) {
-      await ensureInstanceFirewall(network.Id, { blockEgress: parsed.data.blocked });
+      await ensureInstanceFirewall(network.Id, { mode: parsed.data.mode, allowlist });
     }
-    return { ok: true, egressBlocked: parsed.data.blocked };
+    return { ok: true, egressMode: parsed.data.mode, egressAllowlist: allowlist };
   });
 
   fastify.delete('/api/instances/:id', async (request, reply) => {

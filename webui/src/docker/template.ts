@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type Docker from 'dockerode';
 import { docker } from './client.js';
-import { ensureInstanceFirewall, removeInstanceFirewall } from './firewall.js';
+import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY } from './firewall.js';
 import type { CreateInstanceInput } from './validators.js';
 
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
@@ -144,9 +144,10 @@ export async function createInstanceContainer(
   // Applied before the container is even created — the bridge interface
   // exists as soon as the network does, so this closes the window rather
   // than leaving it open until the next reconciler sweep. New instances
-  // always start with egress open (plan item #23 is an opt-in toggle a user
-  // flips after create, not a create-time setting).
-  await ensureInstanceFirewall(network.id, { blockEgress: false });
+  // always start with egress open (plan item #16's policy is an opt-in
+  // change a user makes after create, not a create-time setting) — needed
+  // anyway for the Windows ISO fetch on first boot.
+  await ensureInstanceFirewall(network.id, OPEN_EGRESS_POLICY);
 
   const accountPassword = randomBytes(18).toString('base64url');
 

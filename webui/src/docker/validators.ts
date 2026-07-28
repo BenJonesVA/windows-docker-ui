@@ -66,3 +66,43 @@ export const createInstanceSchema = z
   });
 
 export type CreateInstanceInput = z.infer<typeof createInstanceSchema>;
+
+// IPv4 dotted-quad, optional /0-32 prefix. IPv6 and hostnames deliberately
+// excluded — the firewall helper (docker/firewall.ts) only ever emits IPv4
+// iptables rules today, so accepting a form we can't enforce would silently
+// no-op an admin's intended allow rule.
+const CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(\/(\d|[12]\d|3[0-2]))?$/;
+
+function isValidCidr(value: string): boolean {
+  const match = CIDR_RE.exec(value);
+  if (!match) return false;
+  return match[1]
+    .concat('.', match[2], '.', match[3], '.', match[4])
+    .split('.')
+    .every((octet) => Number(octet) <= 255);
+}
+
+// Bounds the number of ACCEPT rules an allowlist policy generates — each
+// entry is one iptables rule in the instance's dedicated chain (see
+// docker/firewall.ts), and each rule application is one privileged helper
+// container spawn (see reconciler ensureFirewallRules, which reapplies every
+// sweep). 50 is generous for a hand-maintained allowlist while keeping a
+// pathological request from ballooning sweep cost.
+const EGRESS_ALLOWLIST_MAX_ENTRIES = 50;
+
+export const setEgressPolicySchema = z
+  .object({
+    mode: z.enum(['open', 'blocked', 'allowlist']),
+    allowlist: z.array(z.string().refine(isValidCidr, { message: 'must be an IPv4 address or CIDR' })).max(EGRESS_ALLOWLIST_MAX_ENTRIES).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mode === 'allowlist' && (!data.allowlist || data.allowlist.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['allowlist'],
+        message: 'allowlist mode requires at least one CIDR entry',
+      });
+    }
+  });
+
+export type SetEgressPolicyInput = z.infer<typeof setEgressPolicySchema>;

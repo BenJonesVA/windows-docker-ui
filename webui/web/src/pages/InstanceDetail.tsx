@@ -14,6 +14,9 @@ export function InstanceDetail() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [egressBusy, setEgressBusy] = useState(false);
+  const [egressMode, setEgressMode] = useState<'open' | 'blocked' | 'allowlist'>('open');
+  const [egressAllowlistText, setEgressAllowlistText] = useState('');
+  const [egressInitialized, setEgressInitialized] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
 
   async function refresh() {
@@ -31,6 +34,21 @@ export function InstanceDetail() {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Reset the draft on navigation to a different instance...
+  useEffect(() => {
+    setEgressInitialized(false);
+  }, [id]);
+
+  // ...then seed it from the server exactly once per instance. Not every
+  // refresh() poll — that would blow away an in-progress edit the user
+  // hasn't saved yet.
+  useEffect(() => {
+    if (!instance || egressInitialized) return;
+    setEgressMode(instance.egressMode);
+    setEgressAllowlistText(instance.egressAllowlist.join('\n'));
+    setEgressInitialized(true);
+  }, [instance, egressInitialized]);
 
   const ready = instance?.containerState === 'running' && instance.phase === 'ready';
 
@@ -68,15 +86,25 @@ export function InstanceDetail() {
     }
   }
 
-  async function toggleEgress() {
-    if (!id || !instance) return;
+  const egressAllowlistDraft = egressAllowlistText
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const egressDirty =
+    !!instance &&
+    (egressMode !== instance.egressMode ||
+      (egressMode === 'allowlist' &&
+        egressAllowlistDraft.join(',') !== instance.egressAllowlist.join(',')));
+
+  async function saveEgressPolicy() {
+    if (!id) return;
     setEgressBusy(true);
     setError(null);
     try {
-      await api.setEgressBlocked(id, !instance.egressBlocked);
+      await api.setEgressPolicy(id, egressMode, egressMode === 'allowlist' ? egressAllowlistDraft : undefined);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update egress');
+      setError(err instanceof Error ? err.message : 'Failed to update egress policy');
     } finally {
       setEgressBusy(false);
     }
@@ -263,24 +291,46 @@ export function InstanceDetail() {
               </div>
               <div className="vm-spec-row">
                 <span className="vm-spec-k">Internet access</span>
-                <span className="vm-spec-v" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {instance.egressBlocked ? 'Blocked' : 'Allowed'}
-                  <button
-                    className="vm-btn vm-btn--ghost vm-btn--sm"
-                    disabled={egressBusy || installing}
-                    title={installing ? 'Blocking egress during install would hang the Windows ISO fetch' : undefined}
-                    onClick={toggleEgress}
-                  >
-                    {instance.egressBlocked ? 'Unblock' : 'Block'}
-                  </button>
+                <span className="vm-spec-v">
+                  Currently: {instance.egressMode === 'open' ? 'Open' : instance.egressMode === 'blocked' ? 'Blocked' : `Allowlist (${instance.egressAllowlist.length})`}
                 </span>
               </div>
-              {instance.egressBlocked && (
+              <div style={{ display: 'grid', gap: 6 }}>
+                <select
+                  className="vm-select"
+                  value={egressMode}
+                  disabled={egressBusy || installing}
+                  title={installing ? 'Changing egress during install would hang the Windows ISO fetch' : undefined}
+                  onChange={(e) => setEgressMode(e.target.value as typeof egressMode)}
+                >
+                  <option value="open">Open — general internet allowed</option>
+                  <option value="blocked">Blocked — all outbound traffic cut off</option>
+                  <option value="allowlist">Allowlist — only listed CIDRs</option>
+                </select>
+                {egressMode === 'allowlist' && (
+                  <textarea
+                    className="vm-textarea"
+                    rows={3}
+                    placeholder={'One CIDR per line, e.g.\n8.8.8.8/32\n93.184.216.0/24'}
+                    value={egressAllowlistText}
+                    disabled={egressBusy || installing}
+                    onChange={(e) => setEgressAllowlistText(e.target.value)}
+                  />
+                )}
                 <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
-                  All outbound network traffic from this instance is cut off. The viewer connection (browser to this
-                  instance, through the webui's own proxy) is unaffected.
+                  {egressMode === 'open' && 'Lateral traffic to other private networks (LAN, other sandboxes) is always blocked regardless of this setting.'}
+                  {egressMode === 'blocked' && "All outbound network traffic from this instance is cut off. The viewer connection (browser to this instance, through the webui's own proxy) is unaffected."}
+                  {egressMode === 'allowlist' && 'DNS is always allowed. Only traffic to the CIDRs above (plus DNS) can leave the instance; everything else is dropped.'}
                 </div>
-              )}
+                <button
+                  className="vm-btn vm-btn--secondary vm-btn--sm"
+                  style={{ justifySelf: 'start' }}
+                  disabled={egressBusy || installing || !egressDirty || (egressMode === 'allowlist' && egressAllowlistDraft.length === 0)}
+                  onClick={saveEgressPolicy}
+                >
+                  Save
+                </button>
+              </div>
               {instance.accountPassword && (
                 <>
                   <div className="vm-spec-row">
