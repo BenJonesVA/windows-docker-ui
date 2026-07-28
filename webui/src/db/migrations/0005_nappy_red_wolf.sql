@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `max_uptime_override_seconds` integer;

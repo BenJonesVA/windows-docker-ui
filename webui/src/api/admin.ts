@@ -21,6 +21,7 @@ export default async function adminRoutes(fastify: FastifyInstance) {
         role: users.role,
         createdAt: users.createdAt,
         disabledAt: users.disabledAt,
+        maxUptimeOverrideSeconds: users.maxUptimeOverrideSeconds,
       })
       .from(users);
     return rows;
@@ -48,6 +49,27 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     if (!target) return reply.code(404).send({ error: 'not found' });
 
     await db.update(users).set({ disabledAt: null }).where(eq(users.id, id));
+    return { ok: true };
+  });
+
+  // Per-user default max uptime (plan #14 follow-up) — sits between the
+  // tier's global default and a single instance's own override (see
+  // reconciler/index.ts reapIdleAndExpired's precedence: instance > user >
+  // tier). Applies to every instance this user owns, current and future,
+  // without touching the tier for everyone else.
+  fastify.post('/api/admin/users/:id/max-uptime', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = setMaxUptimeOverrideSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
+    }
+    const [target] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (!target) return reply.code(404).send({ error: 'not found' });
+
+    await db
+      .update(users)
+      .set({ maxUptimeOverrideSeconds: parsed.data.maxUptimeOverrideSeconds })
+      .where(eq(users.id, id));
     return { ok: true };
   });
 

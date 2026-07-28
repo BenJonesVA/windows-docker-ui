@@ -8,6 +8,12 @@ export const users = sqliteTable('users', {
   role: text('role', { enum: ['user', 'admin'] }).notNull().default('user'),
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   disabledAt: integer('disabled_at'),
+  // Plan item #14 follow-up — a per-user default max uptime, between the
+  // tier's global default and a single instance's own override in
+  // sandboxInstances. Precedence (see reconciler/index.ts
+  // reapIdleAndExpired): instance override > this user override > tier
+  // default. Null means "use the tier default".
+  maxUptimeOverrideSeconds: integer('max_uptime_override_seconds'),
 });
 
 // Plan item #14 — admin-editable replacement for the constants that used to

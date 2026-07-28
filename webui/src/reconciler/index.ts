@@ -2,7 +2,7 @@ import { and, eq, isNull, lt } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import { docker } from '../docker/client.js';
 import { db } from '../db/client.js';
-import { sandboxInstances } from '../db/schema.js';
+import { sandboxInstances, users } from '../db/schema.js';
 import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY, type EgressPolicy } from '../docker/firewall.js';
 import { stopInstanceContainer } from '../docker/template.js';
 import { getActiveTier } from '../db/resourceTiers.js';
@@ -114,8 +114,9 @@ async function reapIdleAndExpired(log: FastifyBaseLogger) {
   const now = Math.floor(Date.now() / 1000);
   const tier = await getActiveTier();
   const running = await db
-    .select()
+    .select({ instance: sandboxInstances, ownerMaxUptimeOverrideSeconds: users.maxUptimeOverrideSeconds })
     .from(sandboxInstances)
+    .innerJoin(users, eq(sandboxInstances.ownerId, users.id))
     .where(
       and(
         eq(sandboxInstances.containerState, 'running'),
@@ -124,14 +125,16 @@ async function reapIdleAndExpired(log: FastifyBaseLogger) {
       ),
     );
 
-  for (const instance of running) {
+  for (const row of running) {
+    const instance = row.instance;
     if (!instance.containerId) continue;
     const lastActive = instance.lastSeenAt ?? instance.startedAt ?? instance.createdAt;
     const idleFor = now - lastActive;
     const ageFor = now - instance.createdAt;
-    // Plan item #14 — an admin's per-instance override takes priority over
-    // the tier's default; null (the common case) falls back to the tier.
-    const maxLifetime = instance.maxUptimeOverrideSeconds ?? tier.maxLifetimeSeconds;
+    // Precedence (plan #14 follow-up): a single instance's own override wins
+    // over its owner's user-level override, which wins over the tier's
+    // global default.
+    const maxLifetime = instance.maxUptimeOverrideSeconds ?? row.ownerMaxUptimeOverrideSeconds ?? tier.maxLifetimeSeconds;
 
     const reason =
       idleFor > tier.idleTimeoutSeconds

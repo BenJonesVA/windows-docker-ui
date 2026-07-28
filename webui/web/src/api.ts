@@ -72,6 +72,7 @@ export interface AdminUser {
   role: 'user' | 'admin';
   createdAt: number;
   disabledAt: number | null;
+  maxUptimeOverrideSeconds: number | null;
 }
 
 export interface AdminInstance extends SandboxInstance {
@@ -139,6 +140,11 @@ export const api = {
     request<ResourceTier>('/api/admin/resource-tier', { method: 'PUT', body: JSON.stringify(input) }),
   setMaxUptimeOverride: (instanceId: string, maxUptimeOverrideSeconds: number | null) =>
     request<{ ok: true }>(`/api/admin/instances/${instanceId}/max-uptime`, {
+      method: 'POST',
+      body: JSON.stringify({ maxUptimeOverrideSeconds }),
+    }),
+  setUserMaxUptimeOverride: (userId: string, maxUptimeOverrideSeconds: number | null) =>
+    request<{ ok: true }>(`/api/admin/users/${userId}/max-uptime`, {
       method: 'POST',
       body: JSON.stringify({ maxUptimeOverrideSeconds }),
     }),
