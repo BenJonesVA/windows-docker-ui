@@ -1,11 +1,17 @@
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import { docker } from '../docker/client.js';
 import { db } from '../db/client.js';
-import { sandboxInstances, users } from '../db/schema.js';
-import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY, type EgressPolicy } from '../docker/firewall.js';
+import { sandboxInstances, firewallProfiles, users } from '../db/schema.js';
+import {
+  ensureInstanceFirewall,
+  removeInstanceFirewall,
+  compileProfilePolicy,
+  OPEN_EGRESS_POLICY,
+  type EgressPolicy,
+} from '../docker/firewall.js';
 import { stopInstanceContainer } from '../docker/template.js';
-import { getActiveTier } from '../db/resourceTiers.js';
+import { getActiveTier, resolveMaxLifetimeSeconds } from '../db/resourceTiers.js';
 
 const PENDING_GRACE_SECONDS = 2 * 60; // how long a create is allowed to be mid-flight
 const READINESS_PROBE_TIMEOUT_MS = 2000;
@@ -131,10 +137,11 @@ async function reapIdleAndExpired(log: FastifyBaseLogger) {
     const lastActive = instance.lastSeenAt ?? instance.startedAt ?? instance.createdAt;
     const idleFor = now - lastActive;
     const ageFor = now - instance.createdAt;
-    // Precedence (plan #14 follow-up): a single instance's own override wins
-    // over its owner's user-level override, which wins over the tier's
-    // global default.
-    const maxLifetime = instance.maxUptimeOverrideSeconds ?? row.ownerMaxUptimeOverrideSeconds ?? tier.maxLifetimeSeconds;
+    const maxLifetime = resolveMaxLifetimeSeconds(
+      instance.maxUptimeOverrideSeconds,
+      row.ownerMaxUptimeOverrideSeconds,
+      tier.maxLifetimeSeconds,
+    );
 
     const reason =
       idleFor > tier.idleTimeoutSeconds
@@ -205,12 +212,44 @@ async function ensureFirewallRules(log: FastifyBaseLogger) {
       id: sandboxInstances.id,
       egressMode: sandboxInstances.egressMode,
       egressAllowlist: sandboxInstances.egressAllowlist,
+      firewallProfileId: sandboxInstances.firewallProfileId,
     })
     .from(sandboxInstances)
     .where(isNull(sandboxInstances.deletedAt));
 
+  // Batched rather than one lookup per 'profile'-mode instance.
+  const profileIds = [
+    ...new Set(
+      instances
+        .filter((i) => i.egressMode === 'profile' && i.firewallProfileId)
+        .map((i) => i.firewallProfileId as string),
+    ),
+  ];
+  const profileById = new Map(
+    profileIds.length
+      ? (await db.select().from(firewallProfiles).where(inArray(firewallProfiles.id, profileIds))).map((p) => [p.id, p] as const)
+      : [],
+  );
+
   const policyById = new Map<string, EgressPolicy>();
   for (const instance of instances) {
+    if (instance.egressMode === 'profile') {
+      const profile = instance.firewallProfileId ? profileById.get(instance.firewallProfileId) : undefined;
+      if (!profile) {
+        // Referenced profile is missing — shouldn't happen (deletion is
+        // guarded in api/firewallProfiles.ts while any instance still
+        // references it), but fail closed rather than silently falling open
+        // if it ever does.
+        log.error(
+          { instanceId: instance.id, firewallProfileId: instance.firewallProfileId },
+          'assigned firewall profile not found — blocking egress',
+        );
+        policyById.set(instance.id, { mode: 'blocked', allowlist: [] });
+      } else {
+        policyById.set(instance.id, compileProfilePolicy(profile));
+      }
+      continue;
+    }
     let allowlist: string[] = [];
     try {
       allowlist = JSON.parse(instance.egressAllowlist);

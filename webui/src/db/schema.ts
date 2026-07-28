@@ -52,6 +52,35 @@ export const resourceTiers = sqliteTable('resource_tiers', {
   maxAggregateDiskGb: integer('max_aggregate_disk_gb').notNull().default(5 * 128),
 });
 
+// Plan item #24 — firewall/router profiles (graphical egress-rule builder): a
+// reusable, owner-scoped ordered rule list an instance can be assigned to
+// instead of (or as an alternative to) the inline open/blocked/allowlist modes on
+// sandboxInstances below. Compiled to the same EgressPolicy shape
+// docker/firewall.ts already enforces (see compileProfilePolicy) — this
+// table only adds a saved/reusable/named layer on top, not a new
+// enforcement mechanism.
+export const firewallProfiles = sqliteTable('firewall_profiles', {
+  id: text('id').primaryKey(),
+  ownerId: text('owner_id').notNull().references(() => users.id),
+  name: text('name').notNull(),
+  // What happens to traffic that doesn't match any rule below. 'deny' is the
+  // safer default for a fresh profile — an admin/user has to deliberately
+  // open things up, mirroring 'allowlist' mode's default-deny posture.
+  defaultAction: text('default_action', { enum: ['allow', 'deny'] }).notNull().default('deny'),
+  // JSON-encoded, ORDER-PRESERVING array of FirewallRule (docker/firewall.ts)
+  // — array order IS iptables rule order once compiled (first match wins),
+  // same rationale as sandboxInstances.egressAllowlist below for why this is
+  // plain JSON text rather than a child table with its own ordering column.
+  rules: text('rules').notNull().default('[]'),
+  // Visual-only node positions for the graph editor UI, keyed by rule id.
+  // Never read by anything that enforces policy (docker/firewall.ts,
+  // reconciler/index.ts) — purely so reopening the editor doesn't scatter
+  // nodes to a fresh layout every time.
+  nodeLayout: text('node_layout').notNull().default('{}'),
+  createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
+  updatedAt: integer('updated_at').notNull().default(sql`(unixepoch())`),
+});
+
 export const sessions = sqliteTable('sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id),
@@ -101,7 +130,10 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   // override a user/admin triggers themselves — distinct from a future
   // admin-set default policy per resource tier (plan item #14, not yet
   // implemented).
-  egressMode: text('egress_mode', { enum: ['open', 'blocked', 'allowlist'] })
+  // 'profile' (new) delegates the compiled policy to firewallProfileId below
+  // instead of egressAllowlist — a saved, reusable, graphically-edited rule
+  // set rather than an inline CIDR list.
+  egressMode: text('egress_mode', { enum: ['open', 'blocked', 'allowlist', 'profile'] })
     .notNull()
     .default('open'),
   // JSON-encoded array of CIDR strings, meaningful only when egressMode is
@@ -109,6 +141,12 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   // by the API's own validation (docker/validators.ts), so a relational
   // table would be overhead without a real query need.
   egressAllowlist: text('egress_allowlist').notNull().default('[]'),
+  // Meaningful only when egressMode is 'profile'. Nullable rather than
+  // required so the column can exist without forcing every non-profile
+  // instance to reference one; api/instances.ts's egress route clears this
+  // back to null whenever the mode is switched away from 'profile', so a
+  // stale reference never lingers to confuse the next reconciler sweep.
+  firewallProfileId: text('firewall_profile_id').references(() => firewallProfiles.id),
 
   // Plan item #14 — lets an admin force-cap (or effectively force-suspend,
   // by setting a value already in the past) an individual running sandbox
@@ -129,3 +167,4 @@ export type Session = typeof sessions.$inferSelect;
 export type SandboxInstance = typeof sandboxInstances.$inferSelect;
 export type NewSandboxInstance = typeof sandboxInstances.$inferInsert;
 export type ResourceTier = typeof resourceTiers.$inferSelect;
+export type FirewallProfile = typeof firewallProfiles.$inferSelect;

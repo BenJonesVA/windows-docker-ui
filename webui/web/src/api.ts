@@ -31,6 +31,10 @@ export interface InstanceMeta {
   ramMaxMb: number;
   cpuMinCores: number;
   cpuMaxCores: number;
+  // Tier-wide idle-reap threshold — paired with a per-instance createdAt +
+  // maxLifetimeSeconds, this is enough to compute the same "time remaining"
+  // the reconciler enforces (reconciler/index.ts reapIdleAndExpired).
+  idleTimeoutSeconds: number;
   baseImage: string;
 }
 
@@ -47,6 +51,39 @@ export interface InstanceStats {
   memLimitBytes: number;
 }
 
+export interface FirewallRule {
+  id: string;
+  action: 'allow' | 'deny';
+  protocol: 'tcp' | 'udp' | 'any';
+  cidr: string;
+  portFrom?: number;
+  portTo?: number;
+  label?: string;
+}
+
+export interface FirewallProfile {
+  id: string;
+  name: string;
+  defaultAction: 'allow' | 'deny';
+  rules: FirewallRule[];
+  nodeLayout: Record<string, { x: number; y: number }>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type FirewallProfileDraft = {
+  name: string;
+  defaultAction: 'allow' | 'deny';
+  rules: FirewallRule[];
+  nodeLayout?: Record<string, { x: number; y: number }>;
+};
+
+export type EgressPolicyInput =
+  | { mode: 'open' }
+  | { mode: 'blocked' }
+  | { mode: 'allowlist'; allowlist: string[] }
+  | { mode: 'profile'; firewallProfileId: string };
+
 export interface SandboxInstance {
   id: string;
   name: string;
@@ -57,9 +94,18 @@ export interface SandboxInstance {
   containerName: string;
   containerState: 'pending' | 'created' | 'running' | 'exited' | 'error';
   phase: 'installing' | 'ready' | 'failed';
-  egressMode: 'open' | 'blocked' | 'allowlist';
+  egressMode: 'open' | 'blocked' | 'allowlist' | 'profile';
   egressAllowlist: string[];
+  firewallProfileId: string | null;
   maxUptimeOverrideSeconds: number | null;
+  // Resolved instance-override ?? owner-override ?? tier-default (see
+  // db/resourceTiers.ts resolveMaxLifetimeSeconds) — the actual seconds the
+  // reconciler enforces from createdAt, not just this instance's own override.
+  maxLifetimeSeconds: number;
+  // Last activity through the viewer proxy (proxy/viewer.ts) — null until the
+  // viewer's ever been opened, in which case the idle clock runs from
+  // startedAt/createdAt instead (mirrors reconciler/index.ts's fallback).
+  lastSeenAt: number | null;
   accountPassword: string | null;
   createdAt: number;
   startedAt: number | null;
@@ -117,11 +163,20 @@ export const api = {
     request<SandboxInstance>(`/api/instances/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   startInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/start`, { method: 'POST' }),
   stopInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/stop`, { method: 'POST' }),
-  setEgressPolicy: (id: string, mode: 'open' | 'blocked' | 'allowlist', allowlist?: string[]) =>
-    request<{ ok: true; egressMode: string; egressAllowlist: string[] }>(`/api/instances/${id}/egress`, {
-      method: 'POST',
-      body: JSON.stringify({ mode, allowlist }),
-    }),
+  setEgressPolicy: (id: string, input: EgressPolicyInput) =>
+    request<{ ok: true; egressMode: string; egressAllowlist: string[]; firewallProfileId: string | null }>(
+      `/api/instances/${id}/egress`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+
+  listFirewallProfiles: () => request<FirewallProfile[]>('/api/firewall-profiles'),
+  getFirewallProfile: (id: string) => request<FirewallProfile>(`/api/firewall-profiles/${id}`),
+  createFirewallProfile: (input: FirewallProfileDraft) =>
+    request<FirewallProfile>('/api/firewall-profiles', { method: 'POST', body: JSON.stringify(input) }),
+  updateFirewallProfile: (id: string, input: FirewallProfileDraft) =>
+    request<FirewallProfile>(`/api/firewall-profiles/${id}`, { method: 'PUT', body: JSON.stringify(input) }),
+  deleteFirewallProfile: (id: string) =>
+    request<{ ok: true }>(`/api/firewall-profiles/${id}`, { method: 'DELETE' }),
   deleteInstance: (id: string, retainDisk: boolean) =>
     request<{ ok: true }>(`/api/instances/${id}?retain_disk=${retainDisk}`, { method: 'DELETE' }),
   listRetainedVolumes: () => request<RetainedVolume[]>('/api/instances/retained-volumes'),

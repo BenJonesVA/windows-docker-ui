@@ -320,4 +320,26 @@ h1, h2, h3 { margin: 0; }
 .vm-admin-row-main > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vm-admin-row-side { display: flex; align-items: center; gap: 8px; flex: none; }
 
+/* ---- firewall profiles (graph editor) ---- */
+.vm-fw-list { display: grid; gap: 10px; }
+.vm-fw-card {
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--panel);
+}
+.vm-fw-card-name { font-weight: 600; font-size: 13px; }
+.vm-fw-card-meta { font-size: 11.5px; color: var(--fg3); font-family: var(--font-mono); }
+.vm-fw-canvas {
+  height: 480px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); overflow: hidden;
+}
+.vm-fw-canvas .react-flow__attribution { display: none; }
+.vm-fw-canvas .react-flow__controls { box-shadow: none; }
+.vm-fw-canvas .react-flow__controls-button {
+  background: var(--panel); border-bottom: 1px solid var(--line); fill: var(--fg2);
+}
+.vm-fw-canvas .react-flow__controls-button:hover { background: var(--panel2); }
+.vm-fw-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+.vm-fw-rule-form { display: grid; gap: 8px; padding: 11px 12px; }
+.vm-fw-rule-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.vm-fw-empty { padding: 20px 12px; text-align: center; color: var(--fg3); font-size: 12.5px; }
+
 .vm-error-text { color: var(--danger); }

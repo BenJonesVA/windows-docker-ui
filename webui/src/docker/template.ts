@@ -185,6 +185,16 @@ export async function createInstanceContainer(
           PathInContainer: '/dev/kvm',
           CgroupPermissions: 'rwm',
         },
+        // Without this, dockur/windows can't create its tap interface and
+        // silently falls back to user-mode ("passt") networking — the guest
+        // never gets a real DHCP lease on the instance's bridge network, so
+        // it looks like "no IP / no internet" from inside Windows. Matches
+        // dockur/windows' own required devices (windows/compose.yml).
+        {
+          PathOnHost: '/dev/net/tun',
+          PathInContainer: '/dev/net/tun',
+          CgroupPermissions: 'rwm',
+        },
       ],
       Binds: [`${target.volumeName}:/storage`],
       NetworkMode: netName,

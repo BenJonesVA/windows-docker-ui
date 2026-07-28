@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api, type SandboxInstance, type InstanceStats } from '../api';
-import { formatMb, humanDuration, mmss, statusMeta, versionLabel } from '../status';
+import { api, type SandboxInstance, type InstanceStats, type InstanceMeta, type FirewallProfile, type EgressPolicyInput } from '../api';
+import { formatMb, humanDuration, mmss, statusMeta, timeRemaining, versionLabel } from '../status';
 import { useInstanceLogs } from '../useInstanceLogs';
 
 export function InstanceDetail() {
@@ -14,14 +14,30 @@ export function InstanceDetail() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [egressBusy, setEgressBusy] = useState(false);
-  const [egressMode, setEgressMode] = useState<'open' | 'blocked' | 'allowlist'>('open');
+  const [egressMode, setEgressMode] = useState<'open' | 'blocked' | 'allowlist' | 'profile'>('open');
   const [egressAllowlistText, setEgressAllowlistText] = useState('');
+  const [egressProfileId, setEgressProfileId] = useState<string | null>(null);
   const [egressInitialized, setEgressInitialized] = useState(false);
+  const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([]);
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameBusy, setNameBusy] = useState(false);
   const [stats, setStats] = useState<InstanceStats | null>(null);
+  const [meta, setMeta] = useState<InstanceMeta | null>(null);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const stageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.getMeta().then(setMeta).catch(() => {});
+    api.listFirewallProfiles().then(setFirewallProfiles).catch(() => {});
+  }, []);
+
+  // Ticks the countdown every second independent of the 5s instance-refresh
+  // poll — a "3h 42m" figure that only updates on refresh reads as stalled.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   async function refresh() {
     if (!id) return;
@@ -78,6 +94,7 @@ export function InstanceDetail() {
     if (!instance || egressInitialized) return;
     setEgressMode(instance.egressMode);
     setEgressAllowlistText(instance.egressAllowlist.join('\n'));
+    setEgressProfileId(instance.firewallProfileId);
     setEgressInitialized(true);
   }, [instance, egressInitialized]);
 
@@ -125,14 +142,21 @@ export function InstanceDetail() {
     !!instance &&
     (egressMode !== instance.egressMode ||
       (egressMode === 'allowlist' &&
-        egressAllowlistDraft.join(',') !== instance.egressAllowlist.join(',')));
+        egressAllowlistDraft.join(',') !== instance.egressAllowlist.join(',')) ||
+      (egressMode === 'profile' && egressProfileId !== instance.firewallProfileId));
 
   async function saveEgressPolicy() {
     if (!id) return;
     setEgressBusy(true);
     setError(null);
     try {
-      await api.setEgressPolicy(id, egressMode, egressMode === 'allowlist' ? egressAllowlistDraft : undefined);
+      const input: EgressPolicyInput =
+        egressMode === 'allowlist'
+          ? { mode: 'allowlist', allowlist: egressAllowlistDraft }
+          : egressMode === 'profile'
+            ? { mode: 'profile', firewallProfileId: egressProfileId! }
+            : { mode: egressMode };
+      await api.setEgressPolicy(id, input);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update egress policy');
@@ -165,6 +189,7 @@ export function InstanceDetail() {
   const errored = instance.containerState === 'error' || instance.phase === 'failed';
   const stopped = (instance.containerState === 'exited' || instance.containerState === 'created') && instance.phase === 'ready';
   const elapsed = installing ? Math.floor(Date.now() / 1000) - instance.createdAt : 0;
+  const remaining = meta && !errored ? timeRemaining(instance, meta.idleTimeoutSeconds, now) : null;
 
   return (
     <div className="vm-page" style={{ maxWidth: 'none' }}>
@@ -361,6 +386,21 @@ export function InstanceDetail() {
                   <span className="vm-spec-v">{v}</span>
                 </div>
               ))}
+              {remaining && (
+                <div className="vm-spec-row">
+                  <span className="vm-spec-k">Time remaining</span>
+                  <span
+                    className="vm-spec-v"
+                    style={{ color: remaining.seconds <= 5 * 60 ? 'var(--danger)' : undefined }}
+                  >
+                    {remaining.seconds <= 0 ? 'Expired' : humanDuration(remaining.seconds)}{' '}
+                    <span style={{ color: 'var(--fg3)' }}>
+                      ({remaining.reason === 'idle' ? 'idle timeout' : 'max lifetime'}
+                      {!remaining.armed ? ', paused' : ''})
+                    </span>
+                  </span>
+                </div>
+              )}
             </div>
           </div>
           {running && (
@@ -418,7 +458,14 @@ export function InstanceDetail() {
               <div className="vm-spec-row">
                 <span className="vm-spec-k">Internet access</span>
                 <span className="vm-spec-v">
-                  Currently: {instance.egressMode === 'open' ? 'Open' : instance.egressMode === 'blocked' ? 'Blocked' : `Allowlist (${instance.egressAllowlist.length})`}
+                  Currently:{' '}
+                  {instance.egressMode === 'open'
+                    ? 'Open'
+                    : instance.egressMode === 'blocked'
+                      ? 'Blocked'
+                      : instance.egressMode === 'allowlist'
+                        ? `Allowlist (${instance.egressAllowlist.length})`
+                        : `Profile — ${firewallProfiles.find((p) => p.id === instance.firewallProfileId)?.name ?? 'assigned'}`}
                 </span>
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
@@ -432,6 +479,7 @@ export function InstanceDetail() {
                   <option value="open">Open — general internet allowed</option>
                   <option value="blocked">Blocked — all outbound traffic cut off</option>
                   <option value="allowlist">Allowlist — only listed CIDRs</option>
+                  <option value="profile">Profile — use a saved firewall profile</option>
                 </select>
                 {egressMode === 'allowlist' && (
                   <textarea
@@ -443,15 +491,55 @@ export function InstanceDetail() {
                     onChange={(e) => setEgressAllowlistText(e.target.value)}
                   />
                 )}
+                {egressMode === 'profile' &&
+                  (firewallProfiles.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                      No firewall profiles yet.{' '}
+                      <button className="vm-btn vm-btn--ghost vm-btn--sm" style={{ padding: 0 }} onClick={() => navigate('/firewall-profiles')}>
+                        Create one
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      className="vm-select"
+                      value={egressProfileId ?? ''}
+                      disabled={egressBusy || installing}
+                      onChange={(e) => setEgressProfileId(e.target.value || null)}
+                    >
+                      <option value="" disabled>
+                        Select a profile…
+                      </option>
+                      {firewallProfiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.rules.length} rule{p.rules.length === 1 ? '' : 's'})
+                        </option>
+                      ))}
+                    </select>
+                  ))}
                 <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
                   {egressMode === 'open' && 'Lateral traffic to other private networks (LAN, other sandboxes) is always blocked regardless of this setting.'}
                   {egressMode === 'blocked' && "All outbound network traffic from this instance is cut off. The viewer connection (browser to this instance, through the webui's own proxy) is unaffected."}
                   {egressMode === 'allowlist' && 'DNS is always allowed. Only traffic to the CIDRs above (plus DNS) can leave the instance; everything else is dropped.'}
+                  {egressMode === 'profile' && (
+                    <>
+                      DNS is always allowed. Manage this profile's rules from{' '}
+                      <button className="vm-btn vm-btn--ghost vm-btn--sm" style={{ padding: 0 }} onClick={() => navigate('/firewall-profiles')}>
+                        Firewall profiles
+                      </button>
+                      — edits there apply immediately.
+                    </>
+                  )}
                 </div>
                 <button
                   className="vm-btn vm-btn--secondary vm-btn--sm"
                   style={{ justifySelf: 'start' }}
-                  disabled={egressBusy || installing || !egressDirty || (egressMode === 'allowlist' && egressAllowlistDraft.length === 0)}
+                  disabled={
+                    egressBusy ||
+                    installing ||
+                    !egressDirty ||
+                    (egressMode === 'allowlist' && egressAllowlistDraft.length === 0) ||
+                    (egressMode === 'profile' && !egressProfileId)
+                  }
                   onClick={saveEgressPolicy}
                 >
                   Save

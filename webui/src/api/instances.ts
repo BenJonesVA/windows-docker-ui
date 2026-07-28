@@ -2,11 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { sandboxInstances, type ResourceTier } from '../db/schema.js';
+import { sandboxInstances, firewallProfiles, type ResourceTier } from '../db/schema.js';
 import { requireAuth } from '../plugins/auth-context.js';
 import { serializeInstance } from './serialize.js';
 import { docker } from '../docker/client.js';
-import { ensureInstanceFirewall } from '../docker/firewall.js';
+import { ensureInstanceFirewall, compileProfilePolicy, type EgressPolicy } from '../docker/firewall.js';
 import {
   buildCreateInstanceSchema,
   setEgressPolicySchema,
@@ -14,7 +14,7 @@ import {
   ALLOWED_WINDOWS_VERSIONS,
   VERSION_DISK_MIN_GB,
 } from '../docker/validators.js';
-import { getActiveTier } from '../db/resourceTiers.js';
+import { getActiveTier, resolveMaxLifetimeSeconds } from '../db/resourceTiers.js';
 import {
   createInstanceContainer,
   startInstanceContainer,
@@ -100,6 +100,10 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       ramMaxMb: tier.ramMbMax,
       cpuMinCores: tier.cpuCoresMin,
       cpuMaxCores: tier.cpuCoresMax,
+      // Lets the detail page's countdown show which limit (idle vs. max
+      // lifetime) will actually reap the instance first — see
+      // reconciler/index.ts reapIdleAndExpired for the enforcement itself.
+      idleTimeoutSeconds: tier.idleTimeoutSeconds,
       // Plan item #15 — surfaced so the create form can explain a 409 in
       // advance rather than only after a failed submit.
       maxConcurrentInstances: tier.maxConcurrentInstances,
@@ -171,11 +175,17 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
 
   fastify.get('/api/instances', async (request) => {
     const owner = request.currentUser!;
+    const tier = await getActiveTier();
     const rows = await db
       .select()
       .from(sandboxInstances)
       .where(and(eq(sandboxInstances.ownerId, owner.id)));
-    return rows.filter((r) => !r.deletedAt).map(serializeInstance);
+    return rows
+      .filter((r) => !r.deletedAt)
+      .map((r) => ({
+        ...serializeInstance(r),
+        maxLifetimeSeconds: resolveMaxLifetimeSeconds(r.maxUptimeOverrideSeconds, owner.maxUptimeOverrideSeconds, tier.maxLifetimeSeconds),
+      }));
   });
 
   fastify.post('/api/instances', async (request, reply) => {
@@ -238,7 +248,10 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     }
 
     const [final] = await db.select().from(sandboxInstances).where(eq(sandboxInstances.id, id));
-    return reply.code(201).send(serializeInstance(final));
+    return reply.code(201).send({
+      ...serializeInstance(final),
+      maxLifetimeSeconds: resolveMaxLifetimeSeconds(final.maxUptimeOverrideSeconds, owner.maxUptimeOverrideSeconds, tier.maxLifetimeSeconds),
+    });
   });
 
   fastify.get('/api/instances/:id', async (request, reply) => {
@@ -246,7 +259,11 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     const { id } = request.params as { id: string };
     const instance = await getOwnedInstance(id, owner.id);
     if (!instance) return reply.code(404).send({ error: 'not found' });
-    return serializeInstance(instance);
+    const tier = await getActiveTier();
+    return {
+      ...serializeInstance(instance),
+      maxLifetimeSeconds: resolveMaxLifetimeSeconds(instance.maxUptimeOverrideSeconds, owner.maxUptimeOverrideSeconds, tier.maxLifetimeSeconds),
+    };
   });
 
   // Plan item #20 — display name only. containerName/volumeName (the actual
@@ -267,7 +284,11 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
       .set({ name: parsed.data.name })
       .where(eq(sandboxInstances.id, id));
     const [updated] = await db.select().from(sandboxInstances).where(eq(sandboxInstances.id, id));
-    return serializeInstance(updated);
+    const tier = await getActiveTier();
+    return {
+      ...serializeInstance(updated),
+      maxLifetimeSeconds: resolveMaxLifetimeSeconds(updated.maxUptimeOverrideSeconds, owner.maxUptimeOverrideSeconds, tier.maxLifetimeSeconds),
+    };
   });
 
   fastify.post('/api/instances/:id/start', async (request, reply) => {
@@ -321,10 +342,30 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     const instance = await getOwnedInstance(id, owner.id);
     if (!instance) return reply.code(404).send({ error: 'not found' });
 
-    const allowlist = parsed.data.mode === 'allowlist' ? (parsed.data.allowlist ?? []) : [];
+    const allowlist = parsed.data.mode === 'allowlist' ? parsed.data.allowlist : [];
+
+    // 'profile' mode delegates to a saved firewall_profiles row instead of
+    // egressAllowlist — resolved here (owner-scoped, so assigning someone
+    // else's profile 404s rather than leaking its existence) and compiled
+    // to the same EgressPolicy shape every other mode produces.
+    let policy: EgressPolicy;
+    let firewallProfileId: string | null = null;
+    if (parsed.data.mode === 'profile') {
+      const [profile] = await db
+        .select()
+        .from(firewallProfiles)
+        .where(and(eq(firewallProfiles.id, parsed.data.firewallProfileId), eq(firewallProfiles.ownerId, owner.id)))
+        .limit(1);
+      if (!profile) return reply.code(404).send({ error: 'firewall profile not found' });
+      firewallProfileId = profile.id;
+      policy = compileProfilePolicy(profile);
+    } else {
+      policy = { mode: parsed.data.mode, allowlist };
+    }
+
     await db
       .update(sandboxInstances)
-      .set({ egressMode: parsed.data.mode, egressAllowlist: JSON.stringify(allowlist) })
+      .set({ egressMode: parsed.data.mode, egressAllowlist: JSON.stringify(allowlist), firewallProfileId })
       .where(eq(sandboxInstances.id, id));
 
     const network = await docker
@@ -335,9 +376,9 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
         throw err;
       });
     if (network) {
-      await ensureInstanceFirewall(network.Id, { mode: parsed.data.mode, allowlist });
+      await ensureInstanceFirewall(network.Id, policy);
     }
-    return { ok: true, egressMode: parsed.data.mode, egressAllowlist: allowlist };
+    return { ok: true, egressMode: parsed.data.mode, egressAllowlist: allowlist, firewallProfileId };
   });
 
   fastify.delete('/api/instances/:id', async (request, reply) => {

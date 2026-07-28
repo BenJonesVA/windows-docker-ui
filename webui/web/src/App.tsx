@@ -7,6 +7,8 @@ import { Login } from './pages/Login';
 import { Setup } from './pages/Setup';
 import { Dashboard } from './pages/Dashboard';
 import { InstanceDetail } from './pages/InstanceDetail';
+import { FirewallProfiles } from './pages/FirewallProfiles';
+import { FirewallProfileEditor } from './pages/FirewallProfileEditor';
 import { Admin } from './pages/Admin';
 
 // Suffix of statusMeta's badge className ("vm-badge--running" -> "running")
@@ -118,6 +120,10 @@ export function App() {
               })
             )}
           </div>
+          <button className="vm-nav-item" onClick={() => navigate('/firewall-profiles')}>
+            <span className="vm-nav-glyph">&#9875;</span>
+            Firewall
+          </button>
           {me.role === 'admin' && (
             <button className="vm-nav-item" onClick={() => navigate('/admin')}>
               <span className="vm-nav-glyph">&#9881;</span>
@@ -158,6 +164,8 @@ export function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/instances/:id" element={<InstanceDetail />} />
+            <Route path="/firewall-profiles" element={<FirewallProfiles />} />
+            <Route path="/firewall-profiles/:id" element={<FirewallProfileEditor />} />
             {me.role === 'admin' && <Route path="/admin" element={<Admin me={me} />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

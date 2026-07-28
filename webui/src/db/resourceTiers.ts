@@ -39,3 +39,17 @@ export async function getActiveTier(): Promise<ResourceTier> {
   const [inserted] = await db.insert(resourceTiers).values({ id, ...DEFAULT_TIER }).returning();
   return inserted;
 }
+
+// Precedence (plan #14 follow-up): a single instance's own override wins over
+// its owner's user-level override, which wins over the tier's global default.
+// Shared by reconciler/index.ts (enforcement) and api/instances.ts (the
+// "time remaining" figure shown to the owner) so the two can never drift —
+// a countdown that doesn't match what actually reaps the instance is worse
+// than no countdown at all.
+export function resolveMaxLifetimeSeconds(
+  instanceOverrideSeconds: number | null,
+  ownerOverrideSeconds: number | null,
+  tierDefaultSeconds: number,
+): number {
+  return instanceOverrideSeconds ?? ownerOverrideSeconds ?? tierDefaultSeconds;
+}

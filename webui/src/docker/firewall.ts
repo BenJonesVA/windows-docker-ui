@@ -35,12 +35,65 @@ function chainName(iface: string): string {
 // orthogonal to the internet-egress policy below.
 const BLOCKED_EGRESS_CIDRS = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'];
 
+// One ordered rule in a firewall profile (db/schema.ts firewallProfiles).
+// Array order in the profile IS iptables evaluation order once compiled —
+// see populateChain's 'profile' branch below.
+export interface FirewallRule {
+  id: string;
+  action: 'allow' | 'deny';
+  protocol: 'tcp' | 'udp' | 'any';
+  cidr: string;
+  portFrom?: number;
+  portTo?: number;
+}
+
 export interface EgressPolicy {
-  mode: 'open' | 'blocked' | 'allowlist';
+  mode: 'open' | 'blocked' | 'allowlist' | 'profile';
   allowlist: string[];
+  // Only meaningful when mode === 'profile'. This module stays DB-agnostic
+  // (same as the mode/allowlist pair above) — callers (api/instances.ts,
+  // api/firewallProfiles.ts, reconciler/index.ts) resolve a firewall_profiles
+  // row and pass its compiled shape in via compileProfilePolicy below.
+  rules?: FirewallRule[];
+  defaultAction?: 'allow' | 'deny';
 }
 
 export const OPEN_EGRESS_POLICY: EgressPolicy = { mode: 'open', allowlist: [] };
+
+// Shared by every caller that needs to turn a stored firewall_profiles row
+// into the EgressPolicy shape populateChain understands. Takes the raw
+// column shapes (rules as JSON text) directly so callers don't each need
+// their own parse-with-fallback — malformed stored JSON degrades to "no
+// rules" (falls through to defaultAction only) rather than throwing, same
+// posture as egressAllowlist parsing elsewhere in this app.
+export function compileProfilePolicy(profile: { rules: string; defaultAction: 'allow' | 'deny' }): EgressPolicy {
+  let rules: FirewallRule[] = [];
+  try {
+    rules = JSON.parse(profile.rules);
+  } catch {
+    // Malformed stored value — treat as empty; the profile's defaultAction
+    // still applies below.
+  }
+  return { mode: 'profile', allowlist: [], rules, defaultAction: profile.defaultAction };
+}
+
+// A rule's destination CIDR + optional protocol/port scoping, compiled to
+// the trailing args of an `iptables -A <chain> ...` call. Port matching
+// requires -p tcp/udp (validated at the schema level, docker/validators.ts —
+// 'any' + a port range is rejected before it ever reaches here).
+function ruleToIptablesArgs(rule: FirewallRule): string[] {
+  const args = ['-d', rule.cidr];
+  if (rule.protocol !== 'any') {
+    args.push('-p', rule.protocol);
+    if (rule.portFrom !== undefined) {
+      const port =
+        rule.portTo !== undefined && rule.portTo !== rule.portFrom ? `${rule.portFrom}:${rule.portTo}` : String(rule.portFrom);
+      args.push('--dport', port);
+    }
+  }
+  args.push('-j', rule.action === 'allow' ? 'ACCEPT' : 'DROP');
+  return args;
+}
 
 // The webui container deliberately has no NET_ADMIN or host netns of its own
 // (see compose.yml) — only Docker-socket access. Rather than widen the webui
@@ -139,6 +192,30 @@ async function populateChain(chain: string, policy: EgressPolicy): Promise<void>
       await appendRule(chain, ['-d', cidr, '-j', 'ACCEPT']);
     }
     await appendRule(chain, ['-j', 'DROP']);
+    return;
+  }
+
+  if (policy.mode === 'profile') {
+    // Same "DNS always resolves regardless of policy" rationale as allowlist
+    // mode above — a default-deny profile with no explicit DNS rule would
+    // otherwise leave the guest unable to resolve any name at all, which
+    // nothing in the graph editor would obviously surface as the cause.
+    await appendRule(chain, ['-p', 'udp', '--dport', '53', '-j', 'ACCEPT']);
+    await appendRule(chain, ['-p', 'tcp', '--dport', '53', '-j', 'ACCEPT']);
+    // Appended in array order, after the unconditional baseline drops above
+    // — a rule "allowing" an RFC1918/link-local destination can never
+    // actually match, since the earlier baseline DROP for that range wins
+    // first (iptables is first-match). This is what makes it safe to let a
+    // user freely draw an "allow 192.168.0.0/16" edge in the graph editor:
+    // the compiled chain structurally cannot let it reach host/LAN traffic.
+    for (const rule of policy.rules ?? []) {
+      await appendRule(chain, ruleToIptablesArgs(rule));
+    }
+    if (policy.defaultAction === 'deny') {
+      await appendRule(chain, ['-j', 'DROP']);
+    }
+    // defaultAction 'allow': nothing further — same open-egress fallthrough
+    // as 'open' mode below.
     return;
   }
 

@@ -22,6 +22,37 @@ export function humanDuration(totalSeconds: number): string {
   return `${s}s`;
 }
 
+export interface TimeRemaining {
+  seconds: number;
+  reason: 'idle' | 'lifetime';
+  // False once the instance isn't actually running+ready — the reconciler
+  // only reaps rows in that state (reconciler/index.ts reapIdleAndExpired),
+  // so the figure is still the true deadline but nothing is currently
+  // counting down toward it.
+  armed: boolean;
+}
+
+// Mirrors reconciler/index.ts's reapIdleAndExpired precedence exactly
+// (idle-timeout vs. max-lifetime, whichever fires first) so this can never
+// show a number that doesn't match what will actually happen to the
+// instance. maxLifetimeSeconds is the server-resolved instance ?? owner ??
+// tier override (db/resourceTiers.ts resolveMaxLifetimeSeconds).
+export function timeRemaining(
+  instance: Pick<SandboxInstance, 'containerState' | 'phase' | 'createdAt' | 'startedAt' | 'lastSeenAt' | 'maxLifetimeSeconds'>,
+  idleTimeoutSeconds: number,
+  nowSeconds: number,
+): TimeRemaining {
+  const lifetimeRemaining = instance.createdAt + instance.maxLifetimeSeconds - nowSeconds;
+  const armed = instance.containerState === 'running' && instance.phase === 'ready';
+  if (!armed) return { seconds: lifetimeRemaining, reason: 'lifetime', armed };
+
+  const lastActive = instance.lastSeenAt ?? instance.startedAt ?? instance.createdAt;
+  const idleRemaining = lastActive + idleTimeoutSeconds - nowSeconds;
+  return idleRemaining < lifetimeRemaining
+    ? { seconds: idleRemaining, reason: 'idle', armed }
+    : { seconds: lifetimeRemaining, reason: 'lifetime', armed };
+}
+
 export interface StatusMeta {
   label: string;
   className: string;

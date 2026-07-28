@@ -97,20 +97,98 @@ function isValidCidr(value: string): boolean {
 // pathological request from ballooning sweep cost.
 const EGRESS_ALLOWLIST_MAX_ENTRIES = 50;
 
-export const setEgressPolicySchema = z
+// Same rationale/bound as EGRESS_ALLOWLIST_MAX_ENTRIES above — one rule is
+// one iptables -A call, reapplied every reconciler sweep for every instance
+// the profile is assigned to.
+const FIREWALL_PROFILE_MAX_RULES = 50;
+
+const PORT_MIN = 1;
+const PORT_MAX = 65535;
+
+// A single edge in the graph editor: a destination (cidr) reached from the
+// instance's "This Sandbox" source node, scoped by protocol/port and
+// resolved to allow/deny. `id` is client-generated (crypto.randomUUID() in
+// the browser) so the editor's nodeLayout can key positions by it and rules
+// can be reordered/deleted stably — validated for uniqueness in
+// firewallProfileSchema's superRefine below, not here (needs the whole array).
+export const firewallRuleSchema = z
   .object({
-    mode: z.enum(['open', 'blocked', 'allowlist']),
-    allowlist: z.array(z.string().refine(isValidCidr, { message: 'must be an IPv4 address or CIDR' })).max(EGRESS_ALLOWLIST_MAX_ENTRIES).optional(),
+    id: z.string().trim().min(1).max(64),
+    action: z.enum(['allow', 'deny']),
+    protocol: z.enum(['tcp', 'udp', 'any']),
+    cidr: z.string().refine(isValidCidr, { message: 'must be an IPv4 address or CIDR' }),
+    portFrom: z.number().int().min(PORT_MIN).max(PORT_MAX).optional(),
+    portTo: z.number().int().min(PORT_MIN).max(PORT_MAX).optional(),
+    label: z.string().trim().max(64).optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.mode === 'allowlist' && (!data.allowlist || data.allowlist.length === 0)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['allowlist'],
-        message: 'allowlist mode requires at least one CIDR entry',
-      });
+    // iptables --dport requires -p tcp/udp — 'any' + a port range can't be
+    // expressed, and silently dropping the port would mean the rule doesn't
+    // do what its own fields claim.
+    if (data.protocol === 'any' && (data.portFrom !== undefined || data.portTo !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['protocol'], message: 'ports require protocol tcp or udp' });
+    }
+    if (data.portFrom !== undefined && data.portTo !== undefined && data.portFrom > data.portTo) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['portTo'], message: 'portTo must be >= portFrom' });
+    }
+    // portTo alone (no portFrom) would otherwise reach ruleToIptablesArgs
+    // (docker/firewall.ts) with portFrom undefined, which gates the whole
+    // --dport clause off — silently widening the rule to match every port
+    // instead of the single port the form appeared to set.
+    if (data.portTo !== undefined && data.portFrom === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['portFrom'], message: 'portTo requires portFrom' });
     }
   });
+
+export type FirewallRuleInput = z.infer<typeof firewallRuleSchema>;
+
+// A saved, reusable, graphically-edited firewall/router profile (plan
+// item #24). `rules` order is enforcement order (docker/firewall.ts
+// populateChain) — this is the one thing the graph editor's node
+// positions must translate into on save. `nodeLayout` is purely cosmetic,
+// bounded implicitly by rules.length via the superRefine below (every key
+// must correspond to a real rule id) rather than its own separate cap.
+export const firewallProfileSchema = z
+  .object({
+    name: instanceNameSchema,
+    defaultAction: z.enum(['allow', 'deny']),
+    rules: z.array(firewallRuleSchema).max(FIREWALL_PROFILE_MAX_RULES),
+    nodeLayout: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const ids = new Set<string>();
+    data.rules.forEach((rule, i) => {
+      if (ids.has(rule.id)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['rules', i, 'id'], message: 'duplicate rule id' });
+      }
+      ids.add(rule.id);
+    });
+    if (data.nodeLayout) {
+      for (const key of Object.keys(data.nodeLayout)) {
+        if (key !== 'source' && key !== '__default__' && !ids.has(key)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['nodeLayout'], message: `nodeLayout references unknown rule id "${key}"` });
+        }
+      }
+    }
+  });
+
+export type FirewallProfileInput = z.infer<typeof firewallProfileSchema>;
+
+export const setEgressPolicySchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('open') }),
+  z.object({ mode: z.literal('blocked') }),
+  z.object({
+    mode: z.literal('allowlist'),
+    allowlist: z
+      .array(z.string().refine(isValidCidr, { message: 'must be an IPv4 address or CIDR' }))
+      .min(1, 'allowlist mode requires at least one CIDR entry')
+      .max(EGRESS_ALLOWLIST_MAX_ENTRIES),
+  }),
+  z.object({
+    mode: z.literal('profile'),
+    firewallProfileId: z.string().trim().min(1),
+  }),
+]);
 
 export type SetEgressPolicyInput = z.infer<typeof setEgressPolicySchema>;
 
