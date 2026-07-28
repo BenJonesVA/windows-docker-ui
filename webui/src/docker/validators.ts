@@ -43,12 +43,17 @@ export const VERSION_DISK_MIN_GB: Record<(typeof ALLOWED_WINDOWS_VERSIONS)[numbe
 
 const ABSOLUTE_DISK_GB_MIN = Math.min(...Object.values(VERSION_DISK_MIN_GB));
 
+// Shared between create and rename (docker/validators.ts's single source of
+// truth for what a display name is allowed to look like) — kept as one
+// export so the two paths can't silently drift apart.
+export const instanceNameSchema = z.string().trim().min(1).max(64);
+
 // Numeric only — deliberately rejects upstream's own "half"/"max" string
 // shortcuts for RAM_SIZE/CPU_CORES, which would otherwise let a request claim
 // the entire host.
 export const createInstanceSchema = z
   .object({
-    name: z.string().trim().min(1).max(64),
+    name: instanceNameSchema,
     windowsVersion: z.enum(ALLOWED_WINDOWS_VERSIONS),
     ramMb: z.number().int().min(RAM_MB_MIN).max(RAM_MB_MAX),
     cpuCores: z.number().int().min(CPU_CORES_MIN).max(CPU_CORES_MAX),
@@ -106,3 +111,5 @@ export const setEgressPolicySchema = z
   });
 
 export type SetEgressPolicyInput = z.infer<typeof setEgressPolicySchema>;
+
+export const renameInstanceSchema = z.object({ name: instanceNameSchema });

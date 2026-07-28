@@ -67,6 +67,8 @@ export const api = {
     diskGb: number;
   }) => request<SandboxInstance>('/api/instances', { method: 'POST', body: JSON.stringify(input) }),
   getInstance: (id: string) => request<SandboxInstance>(`/api/instances/${id}`),
+  renameInstance: (id: string, name: string) =>
+    request<SandboxInstance>(`/api/instances/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   startInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/start`, { method: 'POST' }),
   stopInstance: (id: string) => request<{ ok: true }>(`/api/instances/${id}/stop`, { method: 'POST' }),
   setEgressPolicy: (id: string, mode: 'open' | 'blocked' | 'allowlist', allowlist?: string[]) =>

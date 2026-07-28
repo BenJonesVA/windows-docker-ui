@@ -9,6 +9,7 @@ import { ensureInstanceFirewall } from '../docker/firewall.js';
 import {
   createInstanceSchema,
   setEgressPolicySchema,
+  renameInstanceSchema,
   ALLOWED_WINDOWS_VERSIONS,
   VERSION_DISK_MIN_GB,
   DISK_GB_MAX,
@@ -155,6 +156,27 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     const instance = await getOwnedInstance(id, owner.id);
     if (!instance) return reply.code(404).send({ error: 'not found' });
     return serializeInstance(instance);
+  });
+
+  // Plan item #20 — display name only. containerName/volumeName (the actual
+  // Docker resource names) are set once at create time and never change;
+  // renaming never touches Docker at all, just the DB row.
+  fastify.patch('/api/instances/:id', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const parsed = renameInstanceSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid request', details: parsed.error.flatten() });
+    }
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    await db
+      .update(sandboxInstances)
+      .set({ name: parsed.data.name })
+      .where(eq(sandboxInstances.id, id));
+    const [updated] = await db.select().from(sandboxInstances).where(eq(sandboxInstances.id, id));
+    return serializeInstance(updated);
   });
 
   fastify.post('/api/instances/:id/start', async (request, reply) => {

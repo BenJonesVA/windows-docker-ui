@@ -17,6 +17,9 @@ export function InstanceDetail() {
   const [egressMode, setEgressMode] = useState<'open' | 'blocked' | 'allowlist'>('open');
   const [egressAllowlistText, setEgressAllowlistText] = useState('');
   const [egressInitialized, setEgressInitialized] = useState(false);
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [nameBusy, setNameBusy] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
 
   async function refresh() {
@@ -110,6 +113,23 @@ export function InstanceDetail() {
     }
   }
 
+  async function saveName() {
+    if (!id) return;
+    const trimmed = nameDraft.trim();
+    if (!trimmed) return;
+    setNameBusy(true);
+    setError(null);
+    try {
+      await api.renameInstance(id, trimmed);
+      setNameEditing(false);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rename instance');
+    } finally {
+      setNameBusy(false);
+    }
+  }
+
   if (!instance) return <div className="vm-page">Loading…</div>;
 
   const m = statusMeta(instance);
@@ -125,7 +145,40 @@ export function InstanceDetail() {
       </button>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
-        <h1 style={{ fontFamily: 'var(--font-mono)', fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em' }}>{instance.name}</h1>
+        {nameEditing ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              className="vm-input"
+              style={{ width: 220, fontSize: 15, fontWeight: 600 }}
+              value={nameDraft}
+              autoFocus
+              maxLength={64}
+              disabled={nameBusy}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') saveName();
+                if (e.key === 'Escape') setNameEditing(false);
+              }}
+            />
+            <button className="vm-btn vm-btn--secondary vm-btn--sm" disabled={nameBusy || !nameDraft.trim()} onClick={saveName}>
+              Save
+            </button>
+            <button className="vm-btn vm-btn--ghost vm-btn--sm" disabled={nameBusy} onClick={() => setNameEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <h1
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em', cursor: 'pointer' }}
+            title="Click to rename"
+            onClick={() => {
+              setNameDraft(instance.name);
+              setNameEditing(true);
+            }}
+          >
+            {instance.name}
+          </h1>
+        )}
         <span className={`vm-badge ${m.className}`}>
           <span className="vm-badge-dot" />
           {m.label}

@@ -35,6 +35,8 @@ export function Dashboard() {
   const [query, setQuery] = useState('');
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
 
   async function refresh() {
     try {
@@ -79,6 +81,22 @@ export function Dashboard() {
       await refresh();
     } catch (err) {
       setBannerError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function saveRename(instance: SandboxInstance) {
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    setBusyId(instance.id);
+    setBannerError(null);
+    try {
+      await api.renameInstance(instance.id, trimmed);
+      setEditingId(null);
+      await refresh();
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : 'Rename failed');
     } finally {
       setBusyId(null);
     }
@@ -177,9 +195,46 @@ export function Dashboard() {
             return (
               <div className="vm-row" key={inst.id}>
                 <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <button className="vm-row-name" onClick={() => navigate(`/instances/${inst.id}`)}>
-                    {inst.name}
-                  </button>
+                  {editingId === inst.id ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <input
+                        className="vm-input"
+                        style={{ padding: '3px 6px', fontSize: 12.5, width: 140 }}
+                        value={editDraft}
+                        autoFocus
+                        maxLength={64}
+                        disabled={busyId === inst.id}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveRename(inst);
+                          if (e.key === 'Escape') setEditingId(null);
+                        }}
+                      />
+                      <button
+                        className="vm-btn vm-btn--ghost vm-btn--sm"
+                        disabled={busyId === inst.id || !editDraft.trim()}
+                        onClick={() => saveRename(inst)}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <button className="vm-row-name" onClick={() => navigate(`/instances/${inst.id}`)}>
+                        {inst.name}
+                      </button>
+                      <button
+                        className="vm-btn vm-btn--ghost vm-btn--sm"
+                        title="Rename"
+                        onClick={() => {
+                          setEditDraft(inst.name);
+                          setEditingId(inst.id);
+                        }}
+                      >
+                        ✎
+                      </button>
+                    </div>
+                  )}
                   <span className="vm-row-sub">{inst.containerName}</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'flex-start' }}>
