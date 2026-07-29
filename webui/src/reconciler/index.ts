@@ -10,8 +10,10 @@ import {
   OPEN_EGRESS_POLICY,
   type EgressPolicy,
 } from '../docker/firewall.js';
-import { stopInstanceContainer } from '../docker/template.js';
+import { stopInstanceContainer, sharedVolumeNameFor } from '../docker/template.js';
+import { ingestInstanceTelemetry } from '../docker/telemetry.js';
 import { getActiveTier, resolveMaxLifetimeSeconds } from '../db/resourceTiers.js';
+import { pruneOldProcessEvents } from '../db/processEvents.js';
 
 const PENDING_GRACE_SECONDS = 2 * 60; // how long a create is allowed to be mid-flight
 const READINESS_PROBE_TIMEOUT_MS = 2000;
@@ -272,6 +274,27 @@ async function ensureFirewallRules(log: FastifyBaseLogger) {
   }
 }
 
+// Plan item #13 — reads any closed telemetry buckets off each instance's
+// /shared volume and inserts them into process_events (docker/telemetry.ts).
+// Not gated on containerState === 'running': the guest can write its last
+// bucket right up until shutdown, and the volume (unlike the container)
+// persists across a stop, so a stopped-but-not-deleted instance can still
+// have unread data sitting there worth collecting. Per-instance try/catch —
+// one instance's helper-container hiccup shouldn't block ingesting the rest,
+// same defensive shape as ensureFirewallRules below.
+async function ingestTelemetry(log: FastifyBaseLogger) {
+  const instances = await db
+    .select({ id: sandboxInstances.id })
+    .from(sandboxInstances)
+    .where(isNull(sandboxInstances.deletedAt));
+
+  for (const instance of instances) {
+    await ingestInstanceTelemetry(instance.id, sharedVolumeNameFor(instance.id)).catch((err) => {
+      log.error({ err, instanceId: instance.id }, 'failed to ingest process telemetry');
+    });
+  }
+}
+
 // Crashed creates (or a killed reconciler mid-teardown) can leave a
 // `sbx-<id>-net` network behind with nothing attached — these silently eat
 // the address-pool budget (see plan's address-pool note) until reaped.
@@ -310,6 +333,10 @@ export function startReconciler(log: FastifyBaseLogger): () => void {
       await reapStalePendingRows(log);
       await ensureFirewallRules(log);
       await reapOrphanNetworks(log);
+      await ingestTelemetry(log);
+      await pruneOldProcessEvents(Math.floor(Date.now() / 1000)).catch((err) => {
+        log.error({ err }, 'failed to prune old process events');
+      });
     } catch (err) {
       log.error({ err }, 'reconciler sweep failed');
     } finally {

@@ -15,6 +15,7 @@ import {
   VERSION_DISK_MIN_GB,
 } from '../docker/validators.js';
 import { getActiveTier, resolveMaxLifetimeSeconds } from '../db/resourceTiers.js';
+import { listRecentProcessEvents } from '../db/processEvents.js';
 import {
   createInstanceContainer,
   startInstanceContainer,
@@ -436,6 +437,30 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     });
     if (!stats) return reply.code(502).send({ error: 'failed to read container stats' });
     return stats;
+  });
+
+  // Plan item #13 — process execution telemetry. Deliberately NOT gated on
+  // containerState, unlike /stats and /screenshot: rows are historical
+  // (already ingested off the guest by the reconciler — see
+  // reconciler/index.ts's ingestTelemetry), so a stopped instance's past
+  // activity is still worth reading, same "works whether running or not"
+  // posture as the shared-files routes.
+  fastify.get('/api/instances/:id/processes', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    const query = request.query as { limit?: string };
+    const parsedLimit = Number(query.limit);
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 1000) : 200;
+
+    const events = await listRecentProcessEvents(id, limit).catch((err) => {
+      request.log.error({ err, instanceId: id }, 'failed to read process events');
+      return null;
+    });
+    if (events === null) return reply.code(502).send({ error: 'failed to read process events' });
+    return events;
   });
 
   // Plan item #7 — hover-to-preview thumbnail. Same not-running 409 shape as

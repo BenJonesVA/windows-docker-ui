@@ -18,14 +18,16 @@ const DEFAULT_GAP = 70;
 
 const ALLOW_COLOR = 'var(--ok)';
 const DENY_COLOR = 'var(--danger)';
+const WARN_COLOR = 'var(--warn)';
 
-function ruleLabel(rule: FirewallRule): string {
+function ruleLabel(rule: FirewallRule, warned: boolean): string {
   const proto = rule.protocol === 'any' ? '' : ` ${rule.protocol}`;
   const port =
     rule.portFrom !== undefined
       ? `:${rule.portFrom}${rule.portTo !== undefined && rule.portTo !== rule.portFrom ? `-${rule.portTo}` : ''}`
       : '';
-  return `${rule.label ? `${rule.label} — ` : ''}${rule.cidr}${proto}${port}`;
+  const prefix = warned ? '⚠ ' : '';
+  return `${prefix}${rule.label ? `${rule.label} — ` : ''}${rule.cidr}${proto}${port}`;
 }
 
 const baseNodeStyle: React.CSSProperties = {
@@ -38,11 +40,13 @@ const baseNodeStyle: React.CSSProperties = {
   width: 220,
 };
 
-function ruleNodeStyle(action: 'allow' | 'deny', selected: boolean): React.CSSProperties {
+function ruleNodeStyle(action: 'allow' | 'deny', selected: boolean, warned: boolean): React.CSSProperties {
   const color = action === 'allow' ? ALLOW_COLOR : DENY_COLOR;
   return {
     ...baseNodeStyle,
     border: `1.5px solid ${color}`,
+    outline: warned ? `2px dashed ${WARN_COLOR}` : undefined,
+    outlineOffset: warned ? 2 : undefined,
     boxShadow: selected ? `0 0 0 3px var(--accent-soft)` : undefined,
   };
 }
@@ -69,6 +73,7 @@ function buildGraph(
   defaultAction: 'allow' | 'deny',
   nodeLayout: Record<string, { x: number; y: number }>,
   selectedRuleId: string | null,
+  warnedRuleIds: Set<string>,
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -85,11 +90,12 @@ function buildGraph(
 
   rules.forEach((rule, i) => {
     const position = nodeLayout[rule.id] ?? { x: RULE_X, y: i * ROW_HEIGHT };
+    const warned = warnedRuleIds.has(rule.id);
     nodes.push({
       id: rule.id,
-      data: { label: ruleLabel(rule) },
+      data: { label: ruleLabel(rule, warned) },
       position,
-      style: ruleNodeStyle(rule.action, rule.id === selectedRuleId),
+      style: ruleNodeStyle(rule.action, rule.id === selectedRuleId, warned),
     });
     edges.push({
       id: `e-${rule.id}`,
@@ -131,6 +137,7 @@ export function FirewallGraphEditor({
   defaultAction,
   nodeLayout,
   selectedRuleId,
+  warnedRuleIds,
   onSelectRule,
   onReorder,
   onLayoutChange,
@@ -139,19 +146,20 @@ export function FirewallGraphEditor({
   defaultAction: 'allow' | 'deny';
   nodeLayout: Record<string, { x: number; y: number }>;
   selectedRuleId: string | null;
+  warnedRuleIds: Set<string>;
   onSelectRule: (id: string | null) => void;
   onReorder: (rules: FirewallRule[]) => void;
   onLayoutChange: (nodeLayout: Record<string, { x: number; y: number }>) => void;
 }) {
   const graph = useMemo(
-    () => buildGraph(rules, defaultAction, nodeLayout, selectedRuleId),
+    () => buildGraph(rules, defaultAction, nodeLayout, selectedRuleId, warnedRuleIds),
     // nodeLayout deliberately excluded — it's only the *initial* position
     // source; once mounted, drag state below is the source of truth so a
     // parent re-render from onLayoutChange doesn't snap a node giving smooth
     // dragging. Re-included whenever rules/defaultAction/selection change,
     // since those can add/remove/restyle nodes outside of dragging.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rules, defaultAction, selectedRuleId],
+    [rules, defaultAction, selectedRuleId, warnedRuleIds],
   );
   const [nodes, setNodes] = useState<Node[]>(graph.nodes);
 

@@ -57,6 +57,17 @@ export interface InstanceStats {
   memLimitBytes: number;
 }
 
+export interface ProcessEvent {
+  id: string;
+  instanceId: string;
+  ts: number;
+  event: 'start' | 'exit';
+  pid: number;
+  ppid: number | null;
+  name: string;
+  cmdline: string | null;
+}
+
 export interface FirewallRule {
   id: string;
   action: 'allow' | 'deny';
@@ -191,6 +202,10 @@ export const api = {
   openViewer: (id: string) =>
     request<{ ok: true; viewerUrl: string }>(`/api/instances/${id}/viewer-session`, { method: 'POST' }),
   getStats: (id: string) => request<InstanceStats>(`/api/instances/${id}/stats`),
+  // Plan item #13 — historical, so this reads fine whether the instance is
+  // currently running or not (rows are already ingested off the guest by the
+  // reconciler by the time they're queryable here).
+  getProcesses: (id: string, limit = 200) => request<ProcessEvent[]>(`/api/instances/${id}/processes?limit=${limit}`),
   // Not a JSON request() call — this is consumed directly as an <img src>,
   // which sends the session cookie itself (same-origin) without needing a
   // fetch+blob-URL round trip. cacheBust just needs to change per request to

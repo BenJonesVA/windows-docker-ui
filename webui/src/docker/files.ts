@@ -1,5 +1,6 @@
 import { docker } from './client.js';
 import { execCapture, execWithStdin } from './exec.js';
+import { TELEMETRY_RESERVED_NAME } from './telemetry.js';
 
 // Reuses the same locally-built helper image firewall.ts spawns (see
 // webui/firewall-helper/Dockerfile + the manual build step in compose.yml)
@@ -55,10 +56,15 @@ export async function listSharedFiles(sharedVolumeName: string): Promise<SharedF
     // + `[ -e "$f" ]` guard is the standard POSIX idiom for "handle an empty
     // directory without a glob match" (also confirmed empirically: a
     // non-matching glob left as a literal string just fails -e cleanly).
+    // Excludes the reserved "telemetry" subfolder (docker/telemetry.ts,
+    // validators.ts's sharedFileNameSchema) — it's collector-internal state,
+    // not a user-facing shared file, and would otherwise show up here as a
+    // confusing directory entry.
     const result = await execCapture(containerId, [
       'sh',
       '-c',
       `for f in ${SHARED_MOUNT}/*; do [ -e "$f" ] || continue; ` +
+        `[ "$(basename "$f")" = "${TELEMETRY_RESERVED_NAME}" ] && continue; ` +
         `printf '%s\\t%s\\t%s\\n' "$(basename "$f")" "$(stat -c '%s' "$f")" "$(stat -c '%Y' "$f")"; done`,
     ]);
     if (result.exitCode !== 0) {
@@ -80,6 +86,7 @@ async function sharedFolderTotalBytes(containerId: string): Promise<number> {
     'sh',
     '-c',
     `total=0; for f in ${SHARED_MOUNT}/*; do [ -e "$f" ] || continue; ` +
+      `[ "$(basename "$f")" = "${TELEMETRY_RESERVED_NAME}" ] && continue; ` +
       `total=$((total + $(stat -c '%s' "$f"))); done; echo "$total"`,
   ]);
   if (result.exitCode !== 0) {

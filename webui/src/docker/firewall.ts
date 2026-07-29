@@ -6,6 +6,19 @@ import { docker } from './client.js';
 const FIREWALL_HELPER_IMAGE =
   process.env.FIREWALL_HELPER_IMAGE ?? 'sandbox-firewall-helper:latest';
 
+// Plan item #26 — a SEPARATE minimal privileged image (webui/net-helper/
+// Dockerfile) rather than widening firewall-helper's own contract (e.g.
+// removing its fixed `ENTRYPOINT ["iptables"]` so it could also run
+// `sysctl`). That would be a breaking change for any already-deployed host
+// that hasn't rebuilt the firewall-helper image — its Cmd-is-iptables-args
+// contract would silently become "Cmd is the whole argv including the
+// binary name," making every `iptables ...` call fail until rebuilt. A
+// second image with its own build step (see compose.yml) means a host that
+// never builds this one just doesn't get anti-spoofing hardening — it can't
+// break the iptables enforcement every other feature in this module depends
+// on.
+const NET_HELPER_IMAGE = process.env.NET_HELPER_IMAGE ?? 'sandbox-net-helper:latest';
+
 // Docker Engine's own default naming for a bridge network's host-side
 // interface: `br-` + the first 12 hex chars of the network ID. There's no
 // field in the Docker API that returns this directly (confirmed against
@@ -26,6 +39,14 @@ function bridgeInterfaceName(networkId: string): string {
 // on top across sweeps, silently reordering ACCEPT vs DROP.
 function chainName(iface: string): string {
   return `SBX-${iface.slice('br-'.length)}`;
+}
+
+// Plan item #26 — a dedicated sub-chain per instance holding only the
+// new-TCP-connection rate limit (see ensureSynFloodChain/populateChain).
+// "SBX-<iface>-SYN" — well under iptables' ~28-char chain name limit
+// alongside the 16-char main chain name.
+function synChainName(iface: string): string {
+  return `${chainName(iface)}-SYN`;
 }
 
 // RFC1918 private ranges + link-local (covers cloud metadata endpoints like
@@ -103,10 +124,10 @@ function ruleToIptablesArgs(rule: FirewallRule): string[] {
 // empirically that -C/-I/-D behave as expected (exit 1 when a rule/chain is
 // absent, 0 once present) run this way, which is what makes the
 // check-then-mutate calls below safe to repeat every reconciler sweep.
-async function runHostIptables(args: string[]): Promise<number> {
+async function spawnPrivilegedHelper(image: string, cmd: string[]): Promise<number> {
   const container = await docker.createContainer({
-    Image: FIREWALL_HELPER_IMAGE,
-    Cmd: args,
+    Image: image,
+    Cmd: cmd,
     HostConfig: {
       NetworkMode: 'host',
       CapAdd: ['NET_ADMIN'],
@@ -118,12 +139,41 @@ async function runHostIptables(args: string[]): Promise<number> {
   return StatusCode;
 }
 
+async function runHostIptables(args: string[]): Promise<number> {
+  return spawnPrivilegedHelper(FIREWALL_HELPER_IMAGE, args);
+}
+
+// Plan item #26 — same spawn pattern as runHostIptables, against the
+// separate net-helper image (ENTRYPOINT ["sysctl"], see NET_HELPER_IMAGE's
+// comment above).
+async function runHostSysctl(args: string[]): Promise<number> {
+  return spawnPrivilegedHelper(NET_HELPER_IMAGE, args);
+}
+
 async function ensureRule(chain: string, ruleArgs: string[]): Promise<void> {
   const exists = (await runHostIptables(['-C', chain, ...ruleArgs])) === 0;
   if (exists) return;
   const inserted = await runHostIptables(['-I', chain, '1', ...ruleArgs]);
   if (inserted !== 0) {
     throw new Error(`iptables -I ${chain} ${ruleArgs.join(' ')} failed with exit code ${inserted}`);
+  }
+}
+
+// Like ensureRule, but appends (-A, end of chain) rather than inserts (-I,
+// position 1) when the rule is missing. ensureRule's insert-at-top is fine
+// when a chain only ever holds one such rule (order among a single rule
+// doesn't matter); it's WRONG for a fixed multi-rule sequence added via
+// separate idempotent calls — inserting each one at position 1 would leave
+// the LAST-added rule on top, reversing the intended order. This is what
+// ensureSynFloodChain needs: its two rules must stay in the order they were
+// first created in, forever, across a chain that (unlike the main policy
+// chain) is never flushed to re-establish order the normal way.
+async function ensureRuleAppended(chain: string, ruleArgs: string[]): Promise<void> {
+  const exists = (await runHostIptables(['-C', chain, ...ruleArgs])) === 0;
+  if (exists) return;
+  const appended = await runHostIptables(['-A', chain, ...ruleArgs]);
+  if (appended !== 0) {
+    throw new Error(`iptables -A ${chain} ${ruleArgs.join(' ')} failed with exit code ${appended}`);
   }
 }
 
@@ -159,17 +209,105 @@ async function appendRule(chain: string, ruleArgs: string[]): Promise<void> {
   }
 }
 
+// Plan item #26 — strict reverse-path filtering on this instance's bridge
+// interface: the kernel drops any packet whose source address wouldn't be
+// routed back out the interface it arrived on, which is exactly what a
+// forged/spoofed source IP looks like. Best-effort and silent by design:
+// - The bridge interface may not exist yet the moment this is first called
+//   (ensureInstanceFirewall runs right after network creation, before a
+//   container has necessarily attached) — sysctl -w against a nonexistent
+//   /proc/sys path fails, and that's expected, not exceptional; the
+//   reconciler's every-60s reapply (reconciler/index.ts ensureFirewallRules)
+//   retries until it succeeds.
+// - This module has no logger of its own (every other function here throws
+//   and lets its caller decide how to log) — but a real policy-enforcement
+//   failure and a missing anti-spoofing nicety are not the same severity,
+//   and this is the one operation in this module that must never be allowed
+//   to block instance creation or the main policy chain from being applied.
+// - Linux takes max(net.ipv4.conf.all.rp_filter, this per-interface value) —
+//   deliberately NOT touching the host-wide `all` setting here (that's a
+//   bigger blast-radius change than a per-instance feature should make on
+//   its own), so this is only fully effective if the host's own default is
+//   already >= 1 (common, not guaranteed).
+async function ensureRpFilter(iface: string): Promise<void> {
+  try {
+    await runHostSysctl(['-w', `net.ipv4.conf.${iface}.rp_filter=1`]);
+  } catch {
+    // Swallowed deliberately — see comment above.
+  }
+}
+
+// Plan item #26 — rate-limits new outbound TCP connection attempts from
+// this instance. There is no inbound path to protect (see plan item #23 —
+// ingress is already zero by design), so this isn't classic "protect a
+// server from a SYN flood"; it's defense-in-depth against a compromised
+// guest being used as a SYN-flood or port-scan SOURCE against someone else.
+// Deliberately generous — 15 new connections/sec with a 45-connection burst
+// tolerates a browser opening a page's worth of parallel connections at
+// once while still meaningfully throttling a scan/flood attempt. Not
+// user-configurable (unlike egress mode/profiles), so there's no path today
+// that changes these constants — if that ever changes, note that -C compares
+// the FULL rule spec including these numbers: bumping either constant makes
+// ensureRuleAppended's -C check "rule not found" and APPEND a second, newer
+// rule below the stale one rather than replacing it. That's fine as long as
+// nothing changes them; it's the thing to fix first if something ever does.
+const SYN_RATE_PER_SECOND = 15;
+const SYN_BURST = 45;
+
+// A dedicated per-instance sub-chain, created once and NEVER flushed —
+// unlike the main policy chain (which populateChain intentionally rebuilds
+// from scratch every call), flushing this one would reset the `-m limit`
+// token bucket every reconciler sweep, making the rate limit meaningless.
+// ensureRuleAppended's -C-then-append idempotency is what makes calling
+// this every sweep safe: once its two rules exist, this never touches them
+// again.
+async function ensureSynFloodChain(iface: string): Promise<void> {
+  const synChain = synChainName(iface);
+  await ensureChain(synChain);
+  // Order matters: within-budget SYNs RETURN to wherever they were jumped
+  // from (see populateChain's jump into this chain) and continue normal
+  // evaluation there; over-budget ones hit the unconditional DROP below and
+  // never return at all. Only correct because the ONLY thing that ever
+  // jumps here is `-p tcp --syn` traffic (see populateChain) — nothing
+  // inside this chain re-checks that itself.
+  await ensureRuleAppended(synChain, ['-m', 'limit', '--limit', `${SYN_RATE_PER_SECOND}/s`, '--limit-burst', `${SYN_BURST}`, '-j', 'RETURN']);
+  await ensureRuleAppended(synChain, ['-j', 'DROP']);
+}
+
 // Rebuilds an instance's chain from scratch every call rather than diffing —
 // simpler to reason about correctly (no partial-update edge cases), at the
 // cost of a flush + N appends worth of helper-container spawns on every
 // reconciler sweep for every instance. Acceptable at today's scale; revisit
 // (e.g. skip the rebuild when policy is unchanged from last sweep) if
 // instance counts or allowlist sizes grow enough for that to matter.
-async function populateChain(chain: string, policy: EgressPolicy): Promise<void> {
+async function populateChain(chain: string, iface: string, policy: EgressPolicy): Promise<void> {
   const flushed = await runHostIptables(['-F', chain]);
   if (flushed !== 0) {
     throw new Error(`iptables -F ${chain} failed with exit code ${flushed}`);
   }
+
+  // Plan item #26 — explicit stateful fast-path. Return/related traffic for
+  // a connection that was already permitted skips re-evaluation against
+  // every rule below on every single packet — a real (if incidental until
+  // now) property this app already depended on: return traffic for an
+  // 'open'-mode connection never even enters this chain today (see the
+  // DOCKER-USER jump's `! -o <iface>` scoping — this chain only ever sees
+  // the egress direction), so this doesn't change what's reachable, only
+  // how much of THIS chain's own rule list re-runs per packet of an
+  // already-established connection. Placed first, unconditionally, for
+  // every mode: a packet can only be in ESTABLISHED/RELATED state because
+  // its connection's initial (NEW) packet already passed every check below
+  // once — nothing here weakens the baseline/policy evaluation a fresh
+  // connection attempt still goes through.
+  await appendRule(chain, ['-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED', '-j', 'ACCEPT']);
+
+  // Plan item #26 — new TCP connection attempts are rate-limited via a
+  // dedicated sub-chain (ensureSynFloodChain) BEFORE the baseline/policy
+  // rules below, defense-in-depth against this instance being used as a
+  // flood/scan source. This jump rule is rebuilt every populateChain call
+  // (like everything else in this chain) — only the sub-chain it points to
+  // is exempt from flushing, so its accumulated rate-limit state survives.
+  await appendRule(chain, ['-p', 'tcp', '--syn', '-j', synChainName(iface)]);
 
   for (const cidr of BLOCKED_EGRESS_CIDRS) {
     await appendRule(chain, ['-d', cidr, '-j', 'DROP']);
@@ -274,11 +412,13 @@ export async function ensureInstanceFirewall(
 ): Promise<void> {
   const iface = bridgeInterfaceName(networkId);
   const chain = chainName(iface);
+  await ensureRpFilter(iface);
   await ensureRule('INPUT', ['-i', iface, '-j', 'DROP']);
   await removeLegacyFlatRules(iface);
   await ensureChain(chain);
+  await ensureSynFloodChain(iface);
   await ensureRule('DOCKER-USER', ['-i', iface, '!', '-o', iface, '-j', chain]);
-  await populateChain(chain, policy);
+  await populateChain(chain, iface, policy);
 }
 
 // Every caller of this function (instance teardown in template.ts,
@@ -301,5 +441,25 @@ export async function removeInstanceFirewall(networkId: string): Promise<void> {
     if (deleted !== 0) {
       throw new Error(`iptables -X ${chain} failed with exit code ${deleted}`);
     }
+  }
+
+  // Plan item #26 — the SYN-limit sub-chain, cleaned up strictly AFTER the
+  // main chain above (whose flush/delete removes the only rule that ever
+  // referenced it — iptables refuses -X on a still-referenced chain).
+  // Deliberately swallowed rather than thrown: every caller of this function
+  // (template.ts's teardown, reconciler's orphan-network cleanup) still has
+  // real work to do right after this returns (removing the network itself),
+  // and a rare "-X" failure here must never block that — the cost of
+  // swallowing is, at worst, one leaked/orphaned sub-chain, the same
+  // accepted risk this function's own top comment already documents for the
+  // main chain in the crash-mid-teardown case.
+  try {
+    const synChain = synChainName(iface);
+    if (await chainExists(synChain)) {
+      await runHostIptables(['-F', synChain]);
+      await runHostIptables(['-X', synChain]);
+    }
+  } catch {
+    // Swallowed — see comment above.
   }
 }

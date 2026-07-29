@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ResourceTier } from '../db/schema.js';
+import { TELEMETRY_RESERVED_NAME } from './telemetry.js';
 
 // Whitelist of VERSION codes this project supports, taken verbatim from
 // windows/readme.md ("How do I select the Windows version?"). Deliberately
@@ -209,7 +210,14 @@ export const sharedFileNameSchema = z
   .refine((name) => !name.includes('/') && !name.includes('\\') && !name.includes('\0'), {
     message: 'filename cannot contain path separators',
   })
-  .refine((name) => name !== '.' && name !== '..', { message: 'invalid filename' });
+  .refine((name) => name !== '.' && name !== '..', { message: 'invalid filename' })
+  // Plan item #13 — "telemetry" is a reserved subfolder at the top of the
+  // same /shared volume (docker/telemetry.ts), written directly by the
+  // guest-side collector over Samba, not through this upload API. Rejecting
+  // it here (case-insensitively — Samba/Windows filenames aren't
+  // case-sensitive) stops a user's own upload from colliding with it; a
+  // plain file at that path would make the collector's `mkdir -p` fail.
+  .refine((name) => name.toLowerCase() !== TELEMETRY_RESERVED_NAME, { message: `"${TELEMETRY_RESERVED_NAME}" is a reserved name` });
 
 // Plan item #14 admin routes (api/admin.ts). Bounds themselves are
 // deliberately unopinionated here (an admin can set genuinely wide limits) —

@@ -3,6 +3,7 @@ import type Docker from 'dockerode';
 import { docker } from './client.js';
 import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY } from './firewall.js';
 import { execCapture } from './exec.js';
+import { ensureOemAssets, OEM_VOLUME_NAME } from './telemetry.js';
 import type { CreateInstanceInput } from './validators.js';
 
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
@@ -160,6 +161,12 @@ export async function createInstanceContainer(
 ): Promise<{ containerId: string; accountPassword: string }> {
   await ensureVolume(target.volumeName);
   await ensureVolume(sharedVolumeNameFor(target.id));
+  // Plan item #13 — populates/refreshes the single shared OEM asset volume
+  // (install.bat + collect-processes.ps1) bound read-only below. Called here
+  // rather than once at webui startup so a webui upgrade that changes the
+  // collector script reaches the very next instance created, with no
+  // separate migration step.
+  await ensureOemAssets();
   const network = await createInstanceNetwork(target.id);
   const netName = network.name;
   // Applied before the container is even created — the bridge interface
@@ -217,7 +224,18 @@ export async function createInstanceContainer(
           CgroupPermissions: 'rwm',
         },
       ],
-      Binds: [`${target.volumeName}:/storage`, `${sharedVolumeNameFor(target.id)}:/shared`],
+      // Plan item #13 — dockur/windows copies whatever is bound at /oem to
+      // C:\OEM on the install image and runs C:\OEM\install.bat at the final
+      // step of unattended setup (windows/readme.md, confirmed against the
+      // vendored windows/src/install.sh addFolder()). :ro since nothing
+      // guest-side needs to write back into it — the collector's own state
+      // lives on C:\ProgramData and its output goes to /shared instead (see
+      // docker/telemetry.ts).
+      Binds: [
+        `${target.volumeName}:/storage`,
+        `${sharedVolumeNameFor(target.id)}:/shared`,
+        `${OEM_VOLUME_NAME}:/oem:ro`,
+      ],
       NetworkMode: netName,
       // Reconciler owns lifecycle decisions, not Docker's own restart
       // policy — a permanently-broken instance (bad template, host resource

@@ -22,6 +22,12 @@
 #      it's never fetched automatically either, and there's no registry to
 #      pull it from since it's built locally):
 #      docker build -t sandbox-firewall-helper:latest ./webui/firewall-helper
+#   4b. Plan item #26 — build the (separate, optional) net helper image, used
+#      only for best-effort anti-spoofing (rp_filter) hardening. Skipping
+#      this step doesn't break anything else — ensureRpFilter fails silently
+#      if the image is missing — it just means that one hardening feature
+#      never applies:
+#      docker build -t sandbox-net-helper:latest ./webui/net-helper
 #   5. Copy .env.example to .env and fill it in.
 #
 # Port 8080 is bound to loopback only. Put a TLS-terminating reverse proxy

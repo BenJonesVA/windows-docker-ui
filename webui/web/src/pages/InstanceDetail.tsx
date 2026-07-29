@@ -8,6 +8,7 @@ import {
   type FirewallProfile,
   type EgressPolicyInput,
   type SharedFileEntry,
+  type ProcessEvent,
 } from '../api';
 import { formatBytes, formatMb, humanDuration, mmss, statusMeta, timeRemaining, versionLabel } from '../status';
 import { useInstanceLogs } from '../useInstanceLogs';
@@ -38,6 +39,8 @@ export function InstanceDetail() {
   const [filesError, setFilesError] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [deletingFile, setDeletingFile] = useState<string | null>(null);
+  const [processEvents, setProcessEvents] = useState<ProcessEvent[] | null>(null);
+  const [processEventsError, setProcessEventsError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -135,6 +138,31 @@ export function InstanceDetail() {
     return () => {
       cancelled = true;
       clearInterval(interval);
+    };
+  }, [id, runningNow]);
+
+  // Plan item #13 — historical, so fetch once regardless of running state
+  // (a stopped instance still has past activity worth showing); poll only
+  // while running, since that's the only time new rows can actually appear —
+  // the reconciler ingests off the guest roughly once a minute
+  // (reconciler/index.ts), so polling faster than that wouldn't show
+  // anything new anyway.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    async function poll() {
+      try {
+        const events = await api.getProcesses(id!);
+        if (!cancelled) setProcessEvents(events);
+      } catch (err) {
+        if (!cancelled) setProcessEventsError(err instanceof Error ? err.message : 'Failed to load process activity');
+      }
+    }
+    poll();
+    const interval = runningNow ? setInterval(poll, 15000) : null;
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
     };
   }, [id, runningNow]);
 
@@ -509,6 +537,11 @@ export function InstanceDetail() {
                 available in the other. RDP is still not exposed; the viewer and the Shared files panel below are the only
                 paths in.
               </div>
+              <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                Regardless of the setting below: this instance's own bridge interface has strict reverse-path filtering
+                (anti-spoofing) enabled, and new outbound TCP connections are rate-limited as a baseline safeguard against
+                this sandbox being used as a flood/scan source.
+              </div>
               <div className="vm-spec-row">
                 <span className="vm-spec-k">Internet access</span>
                 <span className="vm-spec-v">
@@ -681,6 +714,50 @@ export function InstanceDetail() {
               >
                 {uploadBusy ? 'Uploading…' : 'Upload file'}
               </button>
+            </div>
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Process activity">
+            <div className="vm-panel-body" style={{ display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                Process start/exit events sampled from inside the guest roughly once a minute (WMI-based polling — a
+                process that both starts and exits between samples won't appear).
+              </div>
+              {processEventsError && <div className="vm-error-text" style={{ fontSize: 12 }}>{processEventsError}</div>}
+              {processEvents === null ? (
+                <div style={{ fontSize: 12, color: 'var(--fg3)' }}>Reading…</div>
+              ) : processEvents.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--fg3)' }}>No process activity recorded yet.</div>
+              ) : (
+                <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                  {processEvents.map((e) => (
+                    <div className="vm-admin-row" key={e.id}>
+                      <div className="vm-admin-row-main">
+                        <span
+                          style={{
+                            color: e.event === 'start' ? 'var(--accent)' : 'var(--fg3)',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 10.5,
+                            marginRight: 6,
+                          }}
+                        >
+                          {e.event === 'start' ? '+' : '−'}
+                        </span>
+                        <span title={e.cmdline ?? e.name}>{e.name}</span>
+                        <span className="vm-mono-dim" style={{ marginLeft: 6, fontSize: 10.5 }}>
+                          pid {e.pid}
+                          {e.ppid != null ? ` ← ${e.ppid}` : ''}
+                        </span>
+                      </div>
+                      <div className="vm-admin-row-side">
+                        <span className="vm-mono-dim" style={{ fontSize: 10.5 }}>
+                          {new Date(e.ts * 1000).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </CollapsiblePanel>
         </div>

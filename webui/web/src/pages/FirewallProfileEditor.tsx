@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, type FirewallRule } from '../api';
 import { FirewallGraphEditor } from '../components/FirewallGraphEditor';
+import { analyzeRules } from '../lib/firewallAnalysis';
 
 const PROTOCOLS = ['any', 'tcp', 'udp'] as const;
 
@@ -39,6 +40,14 @@ export function FirewallProfileEditor() {
   }, [id]);
 
   const selectedRule = rules.find((r) => r.id === selectedRuleId) ?? null;
+
+  // Plan item #25/#26 — policy dry-run / automatic rule-conflict detection.
+  // Purely client-side (docker/firewall.ts enforces whatever was saved
+  // regardless of these warnings — this is advisory, not validation).
+  const warnings = useMemo(() => analyzeRules(rules), [rules]);
+  const warningsByRuleId = useMemo(() => new Map(warnings.map((w) => [w.ruleId, w.message])), [warnings]);
+  const warnedRuleIds = useMemo(() => new Set(warnings.map((w) => w.ruleId)), [warnings]);
+  const selectedRuleWarning = selectedRule ? warningsByRuleId.get(selectedRule.id) : undefined;
 
   function updateSelectedRule(patch: Partial<FirewallRule>) {
     setRules((rs) => rs.map((r) => (r.id === selectedRuleId ? { ...r, ...patch } : r)));
@@ -127,8 +136,22 @@ export function FirewallProfileEditor() {
       <div style={{ fontSize: 12, color: 'var(--fg2)', marginBottom: 10 }}>
         Drag a rule node up or down to change evaluation order — rules are checked top to bottom, first match wins. DNS is
         always allowed regardless of these rules. Lateral traffic to other private networks (LAN, other sandboxes) is
-        always blocked, regardless of this profile.
+        always blocked, regardless of this profile. New outbound connections are also rate-limited and reverse-path
+        filtered as a baseline safeguard, independent of anything below.
       </div>
+
+      {warnings.length > 0 && (
+        <div className="vm-fw-warning-banner">
+          <strong>
+            {warnings.length} rule{warnings.length === 1 ? '' : 's'} will never take effect
+          </strong>
+          <ul>
+            {warnings.map((w) => (
+              <li key={w.ruleId}>{w.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="vm-fw-editor-grid">
         {rules.length === 0 ? (
@@ -141,6 +164,7 @@ export function FirewallProfileEditor() {
             defaultAction={defaultAction}
             nodeLayout={nodeLayout}
             selectedRuleId={selectedRuleId}
+            warnedRuleIds={warnedRuleIds}
             onSelectRule={setSelectedRuleId}
             onReorder={setRules}
             onLayoutChange={setNodeLayout}
@@ -153,6 +177,7 @@ export function FirewallProfileEditor() {
             <div className="vm-fw-empty">Click a rule node to edit it.</div>
           ) : (
             <div className="vm-fw-rule-form">
+              {selectedRuleWarning && <div className="vm-fw-warning-inline">⚠ {selectedRuleWarning}</div>}
               <div>
                 <div style={{ fontSize: 11, color: 'var(--fg3)', marginBottom: 3 }}>Label (optional)</div>
                 <input

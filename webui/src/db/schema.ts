@@ -162,9 +162,29 @@ export const sandboxInstances = sqliteTable('sandbox_instances', {
   deletedAt: integer('deleted_at'),
 });
 
+// Plan item #13 (process execution telemetry, in-guest half). One row per
+// process start/exit observed by the guest-side polling agent
+// (webui/assets/telemetry-oem/collect-processes.ps1) — see docker/telemetry.ts
+// for how these rows get here (guest -> Z:\telemetry ndjson -> host exec-read
+// -> insert) and reconciler/index.ts for the sweep that ingests + prunes them.
+// `id` is app-generated (nanoid), not autoincrement, matching every other
+// table in this file.
+export const processEvents = sqliteTable('process_events', {
+  id: text('id').primaryKey(),
+  instanceId: text('instance_id').notNull().references(() => sandboxInstances.id),
+  ts: integer('ts').notNull(),
+  event: text('event', { enum: ['start', 'exit'] }).notNull(),
+  pid: integer('pid').notNull(),
+  ppid: integer('ppid'),
+  name: text('name').notNull(),
+  cmdline: text('cmdline'),
+});
+
 export type User = typeof users.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type SandboxInstance = typeof sandboxInstances.$inferSelect;
 export type NewSandboxInstance = typeof sandboxInstances.$inferInsert;
 export type ResourceTier = typeof resourceTiers.$inferSelect;
 export type FirewallProfile = typeof firewallProfiles.$inferSelect;
+export type ProcessEvent = typeof processEvents.$inferSelect;
+export type NewProcessEvent = typeof processEvents.$inferInsert;
