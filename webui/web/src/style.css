@@ -169,6 +169,11 @@ h1, h2, h3 { margin: 0; }
   padding: 7px 11px; border-bottom: 1px solid var(--line); background: var(--bg2);
   font-family: var(--font-mono); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; color: var(--fg3);
 }
+.vm-panel-head--toggle {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; border-left: none; border-right: none; border-top: none; cursor: pointer;
+}
+.vm-panel-head--toggle:hover { color: var(--fg2); }
 .vm-panel-body { padding: 11px; }
 .vm-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 12px;
@@ -199,6 +204,18 @@ h1, h2, h3 { margin: 0; }
   overflow: hidden; text-overflow: ellipsis;
 }
 .vm-mono-dim { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg2); }
+.vm-screenshot-preview {
+  /* position: fixed + JS-computed top/left (Dashboard.tsx) so this floats
+     above everything regardless of which ancestor scrolls — .vm-table has
+     its own overflow: auto, and a plain absolute-positioned child there
+     just grows that container's scrollable area instead of overlaying. */
+  position: fixed; z-index: 1000;
+  width: 260px; height: 162px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.vm-screenshot-preview img { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.vm-screenshot-preview-empty { font-family: var(--font-mono); font-size: 11px; color: var(--fg3); }
 
 /* ---- filters / search ---- */
 .vm-filterbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }

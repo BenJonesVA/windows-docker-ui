@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api, type SandboxInstance, type InstanceStats, type InstanceMeta, type FirewallProfile, type EgressPolicyInput } from '../api';
-import { formatMb, humanDuration, mmss, statusMeta, timeRemaining, versionLabel } from '../status';
+import {
+  api,
+  type SandboxInstance,
+  type InstanceStats,
+  type InstanceMeta,
+  type FirewallProfile,
+  type EgressPolicyInput,
+  type SharedFileEntry,
+} from '../api';
+import { formatBytes, formatMb, humanDuration, mmss, statusMeta, timeRemaining, versionLabel } from '../status';
 import { useInstanceLogs } from '../useInstanceLogs';
+import { CollapsiblePanel } from '../components/CollapsiblePanel';
 
 export function InstanceDetail() {
   const { id } = useParams<{ id: string }>();
@@ -25,12 +34,59 @@ export function InstanceDetail() {
   const [stats, setStats] = useState<InstanceStats | null>(null);
   const [meta, setMeta] = useState<InstanceMeta | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [files, setFiles] = useState<SharedFileEntry[]>([]);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [deletingFile, setDeletingFile] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.getMeta().then(setMeta).catch(() => {});
     api.listFirewallProfiles().then(setFirewallProfiles).catch(() => {});
   }, []);
+
+  async function refreshFiles() {
+    if (!id) return;
+    try {
+      setFiles(await api.listFiles(id));
+    } catch (err) {
+      setFilesError(err instanceof Error ? err.message : 'Failed to load shared files');
+    }
+  }
+
+  useEffect(() => {
+    refreshFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  async function handleUpload(file: File) {
+    if (!id) return;
+    setUploadBusy(true);
+    setFilesError(null);
+    try {
+      await api.uploadFile(id, file);
+      await refreshFiles();
+    } catch (err) {
+      setFilesError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  async function handleDeleteFile(name: string) {
+    if (!id) return;
+    setDeletingFile(name);
+    setFilesError(null);
+    try {
+      await api.deleteFile(id, name);
+      await refreshFiles();
+    } catch (err) {
+      setFilesError(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setDeletingFile(null);
+    }
+  }
 
   // Ticks the countdown every second independent of the 5s instance-refresh
   // poll — a "3h 42m" figure that only updates on refresh reads as stalled.
@@ -364,8 +420,7 @@ export function InstanceDetail() {
         </div>
 
         <div style={{ display: 'grid', gap: 12 }}>
-          <div className="vm-panel">
-            <div className="vm-panel-head">Specification</div>
+          <CollapsiblePanel title="Specification">
             <div style={{ padding: '4px 11px 9px' }}>
               {[
                 ['Image', versionLabel(instance.windowsVersion)],
@@ -402,10 +457,9 @@ export function InstanceDetail() {
                 </div>
               )}
             </div>
-          </div>
+          </CollapsiblePanel>
           {running && (
-            <div className="vm-panel">
-              <div className="vm-panel-head">Live usage</div>
+            <CollapsiblePanel title="Live usage">
               <div style={{ padding: '9px 11px 11px', display: 'grid', gap: 10 }}>
                 {!stats ? (
                   <div style={{ fontSize: 12, color: 'var(--fg3)' }}>Reading…</div>
@@ -446,14 +500,14 @@ export function InstanceDetail() {
                   </>
                 )}
               </div>
-            </div>
+            </CollapsiblePanel>
           )}
-          <div className="vm-panel">
-            <div className="vm-panel-head">Access</div>
+          <CollapsiblePanel title="Access">
             <div className="vm-panel-body" style={{ display: 'grid', gap: 9 }}>
               <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
-                Clipboard passthrough is enabled between your browser and the guest. File transfer and RDP are not exposed —
-                the viewer is the only path in.
+                Copy/paste is synced automatically between your browser and the guest — copying in either one makes it
+                available in the other. RDP is still not exposed; the viewer and the Shared files panel below are the only
+                paths in.
               </div>
               <div className="vm-spec-row">
                 <span className="vm-spec-k">Internet access</span>
@@ -574,7 +628,61 @@ export function InstanceDetail() {
                 </>
               )}
             </div>
-          </div>
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Shared files">
+            <div className="vm-panel-body" style={{ display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                Files here appear on the guest's desktop as "Shared" (drive Z:), and vice versa — works whether the
+                instance is running or stopped.
+              </div>
+              {filesError && <div className="vm-error-text" style={{ fontSize: 12 }}>{filesError}</div>}
+              {files.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--fg3)' }}>No files yet.</div>
+              ) : (
+                <div>
+                  {files.map((f) => (
+                    <div className="vm-admin-row" key={f.name}>
+                      <div className="vm-admin-row-main">
+                        <span title={f.name}>{f.name}</span>
+                      </div>
+                      <div className="vm-admin-row-side">
+                        <span className="vm-mono-dim" style={{ fontSize: 10.5 }}>{formatBytes(f.size)}</span>
+                        <a className="vm-btn vm-btn--ghost vm-btn--sm" href={api.downloadFileUrl(id!, f.name)} download={f.name}>
+                          Get
+                        </a>
+                        <button
+                          className="vm-btn vm-btn--ghost vm-btn--sm"
+                          disabled={deletingFile === f.name}
+                          onClick={() => handleDeleteFile(f.name)}
+                        >
+                          Del
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) handleUpload(file);
+                }}
+              />
+              <button
+                className="vm-btn vm-btn--secondary vm-btn--sm"
+                style={{ justifySelf: 'start' }}
+                disabled={uploadBusy}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {uploadBusy ? 'Uploading…' : 'Upload file'}
+              </button>
+            </div>
+          </CollapsiblePanel>
         </div>
       </div>
     </div>

@@ -4,6 +4,15 @@ export function formatMb(mb: number): string {
   return mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
 }
 
+// Plan item #9/#18 — shared-file listing sizes. Bytes, not MB, since
+// individual files can be well under 1 MB.
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
 export function mmss(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');

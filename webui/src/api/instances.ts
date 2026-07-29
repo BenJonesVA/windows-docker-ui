@@ -26,6 +26,7 @@ import {
   networkNameFor,
   IMAGE_REF,
   getInstanceStats,
+  captureInstanceScreenshot,
 } from '../docker/template.js';
 
 // Own the mapping from Docker's raw state string to our narrower enum here,
@@ -74,7 +75,7 @@ async function checkUserQuota(
   return null;
 }
 
-async function getOwnedInstance(instanceId: string, ownerId: string) {
+export async function getOwnedInstance(instanceId: string, ownerId: string) {
   const [instance] = await db
     .select()
     .from(sandboxInstances)
@@ -435,6 +436,33 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     });
     if (!stats) return reply.code(502).send({ error: 'failed to read container stats' });
     return stats;
+  });
+
+  // Plan item #7 — hover-to-preview thumbnail. Same not-running 409 shape as
+  // /stats: a stopped/installing instance has no QEMU monitor socket to
+  // screendump, and returning a placeholder image would look identical to a
+  // slow-but-real capture. 502 on failure covers the case where the
+  // container IS running but the guest hasn't finished booting QEMU/the
+  // monitor socket yet (screendump timeout) — expected during the first
+  // stretch of `phase: 'installing'`, not just a hard error.
+  fastify.get('/api/instances/:id/screenshot', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+    if (!instance.containerId || instance.containerState !== 'running') {
+      return reply.code(409).send({ error: 'instance is not running' });
+    }
+
+    const png = await captureInstanceScreenshot(instance.containerId).catch((err) => {
+      request.log.warn({ err, instanceId: id }, 'failed to capture instance screenshot');
+      return null;
+    });
+    if (!png) return reply.code(502).send({ error: 'failed to capture screenshot' });
+
+    reply.header('Cache-Control', 'no-store');
+    reply.type('image/png');
+    return reply.send(png);
   });
 
   // SSE tail of container logs — the only install-progress signal available,

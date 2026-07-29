@@ -86,6 +86,62 @@ export default async function viewerProxyRoutes(fastify: FastifyInstance) {
         // used throughout this file.
         return request.proxyContainerName ? `http://${request.proxyContainerName}:8006` : 'http://127.0.0.1:1';
       },
+      // The container's nginx has `gzip on` with the default gzip_types,
+      // which ALWAYS includes text/html regardless of what's configured
+      // (confirmed by reading its actual nginx.conf/default.conf) — so
+      // vnc.html would arrive gzip-compressed whenever the browser sends
+      // Accept-Encoding, and onResponse below decodes it as raw utf8. Strip
+      // the header on every request through this proxy (not just the HTML
+      // one) so upstream never compresses anything — simpler and safer than
+      // adding a gunzip step, and the bandwidth cost of uncompressed JS/CSS
+      // assets over a local bridge network is negligible.
+      rewriteRequestHeaders: (_request, headers) => {
+        const { 'accept-encoding': _drop, ...rest } = headers;
+        return rest;
+      },
+      // Plan item #8 (clipboard, resolved 2026-07-28): noVNC's own clipboard
+      // feature is a manual textarea panel, not real OS-clipboard sync (see
+      // windows/readme.md's own "does not support ... clipboard sharing", and
+      // app/ui.js's clipboardSend/clipboardReceive, confirmed by pulling the
+      // image and reading them directly) — web/public/clipboard-sync.js adds
+      // real two-way sync, but only runs if it's actually loaded into the
+      // page. Providing onResponse hands us the raw upstream response and
+      // makes US responsible for every proxied response, not just the HTML
+      // document (@fastify/reply-from's default is `reply.send(res.stream)` —
+      // confirmed by reading its source — so every non-HTML response below
+      // must still take that exact fallback path unchanged).
+      onResponse: (request, reply, res: any) => {
+        const contentType = String(res.headers['content-type'] ?? '');
+        // statusCode check matters because nginx serves static files
+        // (vnc.html included) with etag/last-modified — and the viewer
+        // reloads the whole page on every socket close by design (VM
+        // reboots during install), so a 304 on a later load is a real,
+        // expected case here, not a hypothetical. A 304 has no body; if we
+        // rewrote it anyway we'd send a body (just the script tag) on a
+        // response Content-Length rules say has none. content-encoding is a
+        // second belt-and-suspenders check in case anything upstream of
+        // this ever adds it despite the header strip above.
+        if (!contentType.includes('text/html') || res.statusCode !== 200 || res.headers['content-encoding']) {
+          reply.send(res.stream);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.stream.on('end', () => {
+          const html = Buffer.concat(chunks).toString('utf8');
+          const scriptTag = '<script type="module" src="/clipboard-sync.js"></script>';
+          // The upstream Content-Length header was already copied onto this
+          // reply before onResponse ever runs (confirmed by reading
+          // @fastify/reply-from's source) — it no longer matches once we
+          // inject bytes, so it must be overwritten or the browser truncates
+          // the response to the stale length.
+          const injected = html.includes('</body>') ? html.replace('</body>', `${scriptTag}</body>`) : html + scriptTag;
+          const body = Buffer.from(injected, 'utf8');
+          reply.header('content-length', body.length);
+          reply.send(body);
+        });
+        res.stream.on('error', (err: Error) => reply.send(err));
+      },
     },
     // Confirmed empirically (spike) that preHandler fires for BOTH plain HTTP
     // requests and the WebSocket upgrade request itself (logged for the

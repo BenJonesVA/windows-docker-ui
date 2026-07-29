@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api, type SandboxInstance, type InstanceMeta, type RetainedVolume } from '../api';
 import { CreateInstanceDrawer } from '../components/CreateInstanceDrawer';
@@ -40,6 +41,21 @@ export function Dashboard() {
   const [retainedVolumes, setRetainedVolumes] = useState<RetainedVolume[]>([]);
   const [purgingId, setPurgingId] = useState<string | null>(null);
   const [showRetained, setShowRetained] = useState(false);
+  // Plan item #7 — hover-to-preview. previewTick both busts the browser's
+  // image cache on each fetch and re-triggers the effect below on its own
+  // interval, so the thumbnail actually refreshes while the mouse stays put
+  // instead of freezing on the first frame.
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [previewTick, setPreviewTick] = useState(0);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  // Anchor coordinates for the portal below — `.vm-table` scrolls its own
+  // content (`overflow: auto`), so a plain `position: absolute` preview
+  // nested inside a row just grows that scroll area instead of floating
+  // over the page (confirmed: that's what "not actually overlaid" looked
+  // like). Rendering into document.body with `position: fixed` and these
+  // viewport coordinates escapes that container entirely.
+  const [previewRect, setPreviewRect] = useState<{ top: number; left: number } | null>(null);
+  const previewHoverTimer = useRef<number | null>(null);
 
   async function refresh() {
     try {
@@ -73,6 +89,45 @@ export function Dashboard() {
   useEffect(() => {
     refreshRetainedVolumes();
   }, []);
+
+  useEffect(() => {
+    if (!previewId) return;
+    // Refresh every 4s while hovered — cheap enough (one docker exec pair
+    // per tick) but frequent enough to feel "live" rather than a static
+    // snapshot from whenever the hover started.
+    const interval = setInterval(() => setPreviewTick(Date.now()), 4000);
+    return () => clearInterval(interval);
+  }, [previewId]);
+
+  function schedulePreview(inst: SandboxInstance, anchor: HTMLElement) {
+    if (inst.containerState !== 'running' || inst.phase !== 'ready') return;
+    if (previewHoverTimer.current) window.clearTimeout(previewHoverTimer.current);
+    // Small hover-intent delay so scrolling/mousing across the table doesn't
+    // fire a capture (and a docker exec into the guest) per row passed over.
+    previewHoverTimer.current = window.setTimeout(() => {
+      const rect = anchor.getBoundingClientRect();
+      setPreviewFailed(false);
+      setPreviewTick(Date.now());
+      setPreviewId(inst.id);
+      setPreviewRect({ top: rect.bottom + 6, left: rect.left });
+    }, 350);
+  }
+
+  function cancelPreview() {
+    if (previewHoverTimer.current) window.clearTimeout(previewHoverTimer.current);
+    setPreviewId(null);
+    setPreviewRect(null);
+  }
+
+  // position: fixed doesn't follow the table's own scroll — drop the
+  // preview rather than let it drift away from the row it's supposed to be
+  // anchored to.
+  useEffect(() => {
+    if (!previewId) return;
+    const handleScroll = () => cancelPreview();
+    window.addEventListener('scroll', handleScroll, true);
+    return () => window.removeEventListener('scroll', handleScroll, true);
+  }, [previewId]);
 
   async function purgeVolume(volume: RetainedVolume) {
     setPurgingId(volume.instanceId);
@@ -223,7 +278,11 @@ export function Dashboard() {
             const busy = inst.phase === 'installing' || inst.containerState === 'error' || busyId === inst.id;
             return (
               <div className="vm-row" key={inst.id}>
-                <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div
+                  style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}
+                  onMouseEnter={(e) => schedulePreview(inst, e.currentTarget)}
+                  onMouseLeave={cancelPreview}
+                >
                   {editingId === inst.id ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                       <input
@@ -414,6 +473,30 @@ export function Dashboard() {
           }}
         />
       )}
+
+      {previewId &&
+        previewRect &&
+        createPortal(
+          <div
+            className="vm-screenshot-preview"
+            style={{ top: previewRect.top, left: previewRect.left }}
+            onMouseEnter={() => {
+              if (previewHoverTimer.current) window.clearTimeout(previewHoverTimer.current);
+            }}
+            onMouseLeave={cancelPreview}
+          >
+            {previewFailed ? (
+              <div className="vm-screenshot-preview-empty">Preview unavailable</div>
+            ) : (
+              <img
+                src={api.screenshotUrl(previewId, previewTick)}
+                alt="Instance preview"
+                onError={() => setPreviewFailed(true)}
+              />
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

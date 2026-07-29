@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type Docker from 'dockerode';
 import { docker } from './client.js';
 import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY } from './firewall.js';
+import { execCapture } from './exec.js';
 import type { CreateInstanceInput } from './validators.js';
 
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
@@ -22,6 +23,17 @@ function networkNameFor(instanceId: string): string {
   return `sbx-${instanceId}-net`;
 }
 
+// Plan item #9/#18's resolved decision: a per-instance scratch volume bound
+// to dockur/windows' own built-in `/shared` mount (SAMBA=Y below), rather
+// than any host-filesystem path — same "everything is a Docker volume, no
+// host path dependency" posture as the main /storage disk. docker/files.ts
+// reads/writes into it via short-lived helper containers, the same pattern
+// firewall.ts uses for host iptables — it's never bind-mounted into the
+// long-lived webui container itself.
+export function sharedVolumeNameFor(instanceId: string): string {
+  return `sbx-${instanceId}-shared`;
+}
+
 // A hard byte-for-byte allowlist of env vars this template will ever set.
 // Everything else documented in windows/docs/environment.md — ARGUMENTS,
 // COMMAND, DISK_OPTIONS, DISK_FLAGS, CPU_FLAGS, SM_BIOS, MONITOR, SERIAL,
@@ -40,7 +52,15 @@ function buildEnv(input: CreateInstanceInput, accountPassword: string): string[]
     'VMX=N', // no nested virtualization exposed to the guest
     'DHCP=N',
     'GPU=N',
-    'SAMBA=N',
+    // Plan item #9/#18 (file upload, resolved 2026-07-28): turns on
+    // dockur/windows' own built-in shared-folder feature, which surfaces the
+    // /shared bind (added below in createInstanceContainer) as a desktop
+    // shortcut + drive Z: inside the guest. This is real new attack surface
+    // (a Samba server now runs inside the container) — accepted deliberately
+    // in exchange for host-filesystem-independent file exchange; the
+    // previous N here was the "viewer is the only path in" invariant, which
+    // this change intentionally ends.
+    'SAMBA=Y',
     'RAM_CHECK=Y',
     'WEB=Y',
     // PROTECT=Y (HTTP Basic Auth on the container's own web viewer, realm
@@ -139,6 +159,7 @@ export async function createInstanceContainer(
   input: CreateInstanceInput,
 ): Promise<{ containerId: string; accountPassword: string }> {
   await ensureVolume(target.volumeName);
+  await ensureVolume(sharedVolumeNameFor(target.id));
   const network = await createInstanceNetwork(target.id);
   const netName = network.name;
   // Applied before the container is even created — the bridge interface
@@ -196,7 +217,7 @@ export async function createInstanceContainer(
           CgroupPermissions: 'rwm',
         },
       ],
-      Binds: [`${target.volumeName}:/storage`],
+      Binds: [`${target.volumeName}:/storage`, `${sharedVolumeNameFor(target.id)}:/shared`],
       NetworkMode: netName,
       // Reconciler owns lifecycle decisions, not Docker's own restart
       // policy — a permanently-broken instance (bad template, host resource
@@ -241,6 +262,13 @@ export async function removeInstanceContainer(
     await docker.getVolume(opts.volumeName).remove().catch((err: any) => {
       if (err.statusCode !== 404) throw err;
     });
+    // Tied to the same removeVolume flag as the main disk — "retain disk"
+    // (plan item #19) is about keeping the OS install around, which the
+    // shared scratch folder isn't; simplest to give it the same lifecycle
+    // rather than invent a second independent retention choice for it.
+    await docker.getVolume(sharedVolumeNameFor(opts.instanceId)).remove().catch((err: any) => {
+      if (err.statusCode !== 404) throw err;
+    });
   }
 }
 
@@ -278,6 +306,118 @@ export async function getInstanceStats(containerId: string): Promise<InstanceSta
     memUsageBytes: stats.memory_stats?.usage ?? 0,
     memLimitBytes: stats.memory_stats?.limit ?? 0,
   };
+}
+
+// Plan item #7 — live thumbnail preview. dockur/windows' own base image
+// (qemux/qemu) always starts QEMU with an HMP monitor on a unix socket at
+// $QEMU_DIR/monitor.sock (QEMU_DIR defaults to /run/shm — confirmed by
+// pulling dockurr/windows and reading /run/config.sh + /run/reset.sh
+// directly; not documented in windows/docs). HMP's `screendump` command
+// dumps the current framebuffer to a PPM file inside the container — no
+// extra capture infrastructure needed, just two `docker exec`s into the
+// instance's own container using tools already present in the image
+// (openbsd-nc for the unix-socket monitor command, python3+zlib — no PIL —
+// for the PPM->PNG re-encode, since the image ships neither ImageMagick nor
+// netpbm). Confirmed both are present in the pulled image before writing
+// this.
+const QEMU_MONITOR_SOCKET = '/run/shm/monitor.sock';
+const SCREENSHOT_PPM_PATH = '/run/shm/sbx-screenshot.ppm';
+
+// Pure-stdlib PPM(P6)->PNG encoder (zlib is always available in CPython,
+// unlike PIL/ImageMagick/netpbm — none of which this image ships). Passed to
+// `python3 -c` as a single exec Cmd array element, so no shell quoting is
+// involved.
+const PPM_TO_PNG_PY = `
+import struct
+import sys
+import zlib
+
+def read_ppm(path):
+    with open(path, 'rb') as f:
+        data = f.read()
+    if not data[:2] == b'P6':
+        raise SystemExit('not a P6 PPM')
+    idx = 2
+    vals = []
+    while len(vals) < 3:
+        while data[idx] in b' \\t\\r\\n':
+            idx += 1
+        if data[idx:idx + 1] == b'#':
+            while data[idx] not in b'\\r\\n':
+                idx += 1
+            continue
+        start = idx
+        while data[idx] not in b' \\t\\r\\n':
+            idx += 1
+        vals.append(int(data[start:idx]))
+    idx += 1  # single whitespace byte required by the format right after maxval
+    width, height, _maxval = vals
+    pixels = data[idx:idx + width * height * 3]
+    if len(pixels) != width * height * 3:
+        # The triggering exec's stability check should prevent this, but
+        # cheap to double-check here rather than emit a PNG whose IHDR
+        # promises more scanlines than IDAT actually holds.
+        raise SystemExit('truncated PPM: expected %d pixel bytes, got %d' % (width * height * 3, len(pixels)))
+    return width, height, pixels
+
+def write_png(width, height, pixels):
+    def chunk(tag, payload):
+        return struct.pack('>I', len(payload)) + tag + payload + struct.pack('>I', zlib.crc32(tag + payload) & 0xffffffff)
+    stride = width * 3
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type 0 (None) per scanline
+        raw.extend(pixels[y * stride:(y + 1) * stride])
+    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    out = b'\\x89PNG\\r\\n\\x1a\\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(bytes(raw), 6)) + chunk(b'IEND', b'')
+    sys.stdout.buffer.write(out)
+
+w, h, px = read_ppm('${SCREENSHOT_PPM_PATH}')
+write_png(w, h, px)
+`;
+
+// Two execs, not one shell one-liner: keeps the nc/wait step (whose only job
+// is to produce a file) and the python conversion step (whose stdout IS the
+// response body) from sharing a single stdout stream, which would otherwise
+// require careful separation of QEMU-monitor chatter from PNG bytes.
+export async function captureInstanceScreenshot(containerId: string): Promise<Buffer> {
+  const trigger = await execCapture(containerId, [
+    'sh',
+    '-c',
+    // -q 1: close the nc connection ~1s after stdin EOF, giving QEMU's
+    // monitor time to process the command before the socket is torn down.
+    // `screendump` on a full 1080p framebuffer is several MB — HMP has no
+    // "done" signal, so `-s file` (exists, non-empty) alone races a partial
+    // write. Require the file size to read identical on two consecutive
+    // polls 0.2s apart before treating it as complete.
+    `rm -f ${SCREENSHOT_PPM_PATH}; printf 'screendump %s\\n' ${SCREENSHOT_PPM_PATH} | nc -U -q 1 ${QEMU_MONITOR_SOCKET}; ` +
+      `prev=-1; for i in $(seq 1 40); do ` +
+      `if [ -s ${SCREENSHOT_PPM_PATH} ]; then cur=$(wc -c < ${SCREENSHOT_PPM_PATH}); ` +
+      `if [ "$cur" = "$prev" ]; then exit 0; fi; prev=$cur; fi; sleep 0.2; done; exit 1`,
+  ]);
+  if (trigger.exitCode !== 0) {
+    throw new Error('screendump produced no stable file — instance may still be booting or the monitor socket is unavailable');
+  }
+
+  const convert = await execCapture(containerId, ['python3', '-c', PPM_TO_PNG_PY]);
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  // Trust the payload over the exit code: exec.inspect() immediately after
+  // the hijacked stream's 'end' can still report a stale/null ExitCode for
+  // an otherwise-successful run. A real PNG magic header is the actual
+  // source of truth for "did this work."
+  if (!convert.stdout.subarray(0, 8).equals(PNG_MAGIC)) {
+    throw new Error(
+      `screenshot conversion failed (exit ${convert.exitCode}): ${convert.stderr.toString('utf8').slice(0, 500)}`,
+    );
+  }
+
+  await execCapture(containerId, ['rm', '-f', SCREENSHOT_PPM_PATH]).catch(() => {
+    // Best-effort tmpfs cleanup — a leaked PPM is wasted memory-cgroup-backed
+    // storage, not a correctness problem, so a failure here shouldn't fail
+    // the whole capture.
+  });
+
+  return convert.stdout;
 }
 
 export async function tailInstanceLogs(containerId: string, sinceSeconds = 60) {

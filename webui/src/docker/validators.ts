@@ -194,6 +194,23 @@ export type SetEgressPolicyInput = z.infer<typeof setEgressPolicySchema>;
 
 export const renameInstanceSchema = z.object({ name: instanceNameSchema });
 
+// Plan item #9/#18 (file upload). The value reaches the shell as a
+// positional arg, never interpolated into script text (docker/files.ts), so
+// this isn't guarding against shell injection — it's guarding against path
+// traversal, which quoting a value does NOT prevent (confirmed empirically:
+// a literal ".." component in a quoted path still walks out of /shared at
+// the OS level). No slashes, no backslashes, no ".." — a flat folder only,
+// matching what dockur/windows' own Samba share exposes.
+export const sharedFileNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((name) => !name.includes('/') && !name.includes('\\') && !name.includes('\0'), {
+    message: 'filename cannot contain path separators',
+  })
+  .refine((name) => name !== '.' && name !== '..', { message: 'invalid filename' });
+
 // Plan item #14 admin routes (api/admin.ts). Bounds themselves are
 // deliberately unopinionated here (an admin can set genuinely wide limits) —
 // the invariant this enforces is internal consistency (min <= max), not a
