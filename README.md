@@ -40,6 +40,19 @@ the manager pulls the published `dockurr/windows` image by pinned digest.
 
 ## Deploying
 
+Fastest path on a fresh Linux Docker host — `install.sh` runs every step below
+(idempotent, safe to re-run), then starts the manager:
+
+```
+sudo ./install.sh
+# or, for a fully non-interactive run that also seeds the first admin:
+sudo ./install.sh --yes --seed-email=you@example.com --seed-password='pick-something'
+```
+
+It stops short of putting a reverse proxy in front (step 5 below) — do that
+yourself. The manual steps it automates, spelled out here for anyone who wants
+to do them by hand or understand what it's doing:
+
 1. Widen the Docker daemon's address-pool so it can hand out one bridge
    network per instance (the built-in pool only supports ~30). Merge
    [`deploy/daemon.json`](deploy/daemon.json) into `/etc/docker/daemon.json`
@@ -56,17 +69,28 @@ the manager pulls the published `dockurr/windows` image by pinned digest.
    docker pull dockurr/windows@sha256:743847e75b776790c059f33ac6654f84727ba36a6d458a61e37cb2b2f043d168
    ```
 
-3. Configure and start the manager:
+3. Build the helper images the manager spawns via the Docker socket at
+   runtime — neither is fetched automatically, and there's no registry to
+   pull them from since both are built locally:
+   ```
+   docker build -t sandbox-firewall-helper:latest ./webui/firewall-helper
+   docker build -t sandbox-net-helper:latest ./webui/net-helper   # optional — anti-spoofing hardening only, skips silently if missing
+   ```
+   Skipping `sandbox-firewall-helper` is **not** optional — every instance
+   create/telemetry-ingest call needs it and fails (502 / silent ingest
+   errors in the logs) without it.
+
+4. Configure and start the manager:
    ```
    cp .env.example .env   # fill in COOKIE_SECRET, set COOKIE_SECURE=true once TLS is in front
    docker compose up -d --build
    ```
 
-4. Put a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of
+5. Put a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of
    `127.0.0.1:8080` and expose only 443 — `COOKIE_SECURE=true` means the
    login cookie is silently dropped by the browser over plain HTTP.
 
-5. Create the first admin account (there is no default one — see below):
+6. Create the first admin account (there is no default one — see below):
    ```
    docker compose exec webui sh -c "SEED_EMAIL=you@example.com SEED_PASSWORD='pick-something' npm run db:seed"
    ```
