@@ -78,3 +78,32 @@ export async function execCapture(containerId: string, cmd: string[]): Promise<E
 export async function execWithStdin(containerId: string, cmd: string[], input: Buffer): Promise<ExecResult> {
   return runExec(containerId, cmd, input);
 }
+
+// Reused across docker/files.ts, docker/telemetry.ts, and
+// docker/networkCapture.ts — each needed the identical "spin up a short-lived
+// container with some binds, exec into it, tear it down" shape (a third
+// near-identical private copy is what triggered pulling this out). Built from
+// the locally-built firewall helper image (webui/firewall-helper/), already a
+// required deploy step for firewall.ts — entrypoint overridden to `sleep`
+// since `docker exec` needs something running to attach to, and none of these
+// callers ever invoke the image's own `iptables` entrypoint.
+export const DEFAULT_HELPER_IMAGE = process.env.FIREWALL_HELPER_IMAGE ?? 'sandbox-firewall-helper:latest';
+
+export async function withHelperContainer<T>(
+  binds: string[],
+  fn: (containerId: string) => Promise<T>,
+  image: string = DEFAULT_HELPER_IMAGE,
+): Promise<T> {
+  const container = await docker.createContainer({
+    Image: image,
+    Entrypoint: ['sleep'],
+    Cmd: ['300'],
+    HostConfig: { Binds: binds },
+  });
+  await container.start();
+  try {
+    return await fn(container.id);
+  } finally {
+    await container.remove({ force: true }).catch(() => {});
+  }
+}

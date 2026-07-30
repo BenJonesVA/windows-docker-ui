@@ -3,7 +3,8 @@ import type Docker from 'dockerode';
 import { docker } from './client.js';
 import { ensureInstanceFirewall, removeInstanceFirewall, OPEN_EGRESS_POLICY } from './firewall.js';
 import { execCapture } from './exec.js';
-import { ensureOemAssets, OEM_VOLUME_NAME } from './telemetry.js';
+import { ensureOemAssets, ensureTelemetryDir, OEM_VOLUME_NAME } from './telemetry.js';
+import { NETWORK_CAPTURE_PATH } from './networkCapture.js';
 import type { CreateInstanceInput } from './validators.js';
 
 // Pin by digest, not `:latest` — re-verify this against `docker inspect
@@ -38,11 +39,12 @@ export function sharedVolumeNameFor(instanceId: string): string {
 // A hard byte-for-byte allowlist of env vars this template will ever set.
 // Everything else documented in windows/docs/environment.md — ARGUMENTS,
 // COMMAND, DISK_OPTIONS, DISK_FLAGS, CPU_FLAGS, SM_BIOS, MONITOR, SERIAL,
-// BIOS, DNSMASQ_OPTS, PASST_OPTS, STORAGE, DHCP, GPU, VMX, SAMBA, etc. — is
-// either pinned below to a fixed safe value or simply never set. None of it
-// is ever derived from caller input. This is the actual code-execution
-// surface identified during planning; treat any change here as security
-// sensitive.
+// BIOS, DNSMASQ_OPTS, STORAGE, DHCP, GPU, VMX, SAMBA, etc. — is either pinned
+// below to a fixed safe value or simply never set. None of it is ever derived
+// from caller input. This is the actual code-execution surface identified
+// during planning; treat any change here as security sensitive. (PASST_OPTS
+// moved from "never set" to "pinned below" for plan item #17/#2/#3 — still a
+// fixed value, never caller-derived.)
 function buildEnv(input: CreateInstanceInput, accountPassword: string): string[] {
   return [
     `VERSION=${input.windowsVersion}`,
@@ -50,6 +52,17 @@ function buildEnv(input: CreateInstanceInput, accountPassword: string): string[]
     `CPU_CORES=${input.cpuCores}`,
     `DISK_SIZE=${input.diskGb}G`,
     'NETWORK=user', // usermode/passt QEMU networking — no guest L2 presence on the bridge
+    // Plan item #17/#2/#3 (resolved 2026-07-29): passt's own traffic-capture
+    // flag ("Log tap-facing traffic to pcap file", confirmed via `passt
+    // --help` in the pulled dockurr/windows image), not a networking-mode
+    // switch — NAT/tap mode was investigated and rejected, since it still
+    // NATs guest traffic out through the container's single IP before
+    // anything reaches the Docker bridge, no better a capture point than
+    // passt already is. Written to the same reserved telemetry/ subfolder
+    // #13's process collector uses (docker/networkCapture.ts's
+    // NETWORK_CAPTURE_PATH) — ensureTelemetryDir below guarantees that
+    // directory exists before this container (and therefore passt) starts.
+    `PASST_OPTS=--pcap ${NETWORK_CAPTURE_PATH}`,
     'VMX=N', // no nested virtualization exposed to the guest
     'DHCP=N',
     'GPU=N',
@@ -161,6 +174,12 @@ export async function createInstanceContainer(
 ): Promise<{ containerId: string; accountPassword: string }> {
   await ensureVolume(target.volumeName);
   await ensureVolume(sharedVolumeNameFor(target.id));
+  // Plan item #17/#2/#3 — must run before the container is created: passt
+  // opens its --pcap path once at container start, before Windows has even
+  // booted, so the reserved telemetry/ subfolder needs to already exist on a
+  // brand-new instance's very first boot (unlike the process collector,
+  // which tolerates the folder not existing yet and just skips a cycle).
+  await ensureTelemetryDir(sharedVolumeNameFor(target.id));
   // Plan item #13 — populates/refreshes the single shared OEM asset volume
   // (install.bat + collect-processes.ps1) bound read-only below. Called here
   // rather than once at webui startup so a webui upgrade that changes the
@@ -207,20 +226,24 @@ export async function createInstanceContainer(
       CapAdd: ['NET_ADMIN', 'CHOWN', 'DAC_OVERRIDE', 'SETGID', 'SETUID'],
       SecurityOpt: ['no-new-privileges'],
       PidsLimit: 512,
+      // /dev/net/tun was previously granted here on the belief that without
+      // it, dockur/windows "silently falls back to user-mode (passt)
+      // networking." That was stale: confirmed by reading the actual
+      // (unvendored) windows/src/network.sh from the pulled dockurr/windows
+      // image during plan item #17's investigation — /dev/net/tun is only
+      // ever touched by configureNAT(), which only runs when isNAT()
+      // matches, and isNAT() explicitly excludes "user" (this app's fixed
+      // NETWORK= value above). Grepped every script in the image for
+      // "dev/net/tun" to confirm network.sh is the only consumer before
+      // removing this. Passt (the mode actually in use) needs no tun/tap
+      // device at all — it operates entirely in userspace over a unix
+      // socket. Not verified against a live boot with the device actually
+      // removed (no /dev/kvm in this dev environment) — verify empirically
+      // before relying on this if guest networking ever regresses.
       Devices: [
         {
           PathOnHost: '/dev/kvm',
           PathInContainer: '/dev/kvm',
-          CgroupPermissions: 'rwm',
-        },
-        // Without this, dockur/windows can't create its tap interface and
-        // silently falls back to user-mode ("passt") networking — the guest
-        // never gets a real DHCP lease on the instance's bridge network, so
-        // it looks like "no IP / no internet" from inside Windows. Matches
-        // dockur/windows' own required devices (windows/compose.yml).
-        {
-          PathOnHost: '/dev/net/tun',
-          PathInContainer: '/dev/net/tun',
           CgroupPermissions: 'rwm',
         },
       ],

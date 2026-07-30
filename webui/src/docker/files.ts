@@ -1,14 +1,6 @@
-import { docker } from './client.js';
-import { execCapture, execWithStdin } from './exec.js';
+import { execCapture, execWithStdin, withHelperContainer } from './exec.js';
 import { TELEMETRY_RESERVED_NAME } from './telemetry.js';
 
-// Reuses the same locally-built helper image firewall.ts spawns (see
-// webui/firewall-helper/Dockerfile + the manual build step in compose.yml)
-// — it's already alpine, already a required deploy step, and the file
-// operations below never invoke its `iptables` entrypoint at all (overridden
-// to a plain `sleep` below so the container has something to keep running
-// while exec'd into). Not worth a second image/build step just for a label.
-const FILE_HELPER_IMAGE = process.env.FIREWALL_HELPER_IMAGE ?? 'sandbox-firewall-helper:latest';
 const SHARED_MOUNT = '/shared';
 
 // One upload's worth. Multipart itself also caps this (api/files.ts) — this
@@ -27,24 +19,8 @@ export interface SharedFileEntry {
   mtimeSeconds: number;
 }
 
-async function withSharedVolumeContainer<T>(sharedVolumeName: string, fn: (containerId: string) => Promise<T>): Promise<T> {
-  const container = await docker.createContainer({
-    Image: FILE_HELPER_IMAGE,
-    // Overrides the image's own `ENTRYPOINT ["iptables"]` (firewall.ts's
-    // use) — `docker exec` requires a running container, and plain
-    // `iptables` with no args exits immediately. 300s is just a safety net
-    // in case removal below is ever skipped by a crash; every call path
-    // force-removes explicitly rather than relying on this timeout.
-    Entrypoint: ['sleep'],
-    Cmd: ['300'],
-    HostConfig: { Binds: [`${sharedVolumeName}:${SHARED_MOUNT}`] },
-  });
-  await container.start();
-  try {
-    return await fn(container.id);
-  } finally {
-    await container.remove({ force: true }).catch(() => {});
-  }
+function withSharedVolumeContainer<T>(sharedVolumeName: string, fn: (containerId: string) => Promise<T>): Promise<T> {
+  return withHelperContainer([`${sharedVolumeName}:${SHARED_MOUNT}`], fn);
 }
 
 export async function listSharedFiles(sharedVolumeName: string): Promise<SharedFileEntry[]> {

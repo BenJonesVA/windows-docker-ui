@@ -28,7 +28,9 @@ import {
   IMAGE_REF,
   getInstanceStats,
   captureInstanceScreenshot,
+  sharedVolumeNameFor,
 } from '../docker/template.js';
+import { getNetworkCaptureInfo, downloadNetworkCapture } from '../docker/networkCapture.js';
 
 // Own the mapping from Docker's raw state string to our narrower enum here,
 // rather than trusting arbitrary values into the DB column.
@@ -461,6 +463,48 @@ export default async function instanceRoutes(fastify: FastifyInstance) {
     });
     if (events === null) return reply.code(502).send({ error: 'failed to read process events' });
     return events;
+  });
+
+  // Plan item #17/#2/#3 — network traffic capture (passt --pcap). Same
+  // "works whether running or stopped" posture as the shared-files routes:
+  // the capture lives in the /shared volume, independent of container state.
+  fastify.get('/api/instances/:id/network-capture', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    const info = await getNetworkCaptureInfo(sharedVolumeNameFor(id)).catch((err) => {
+      request.log.error({ err, instanceId: id }, 'failed to stat network capture');
+      return undefined;
+    });
+    if (info === undefined) return reply.code(502).send({ error: 'failed to read network capture info' });
+    if (info === null) return reply.code(404).send({ error: 'no capture available yet' });
+    return info;
+  });
+
+  fastify.get('/api/instances/:id/network-capture/download', async (request, reply) => {
+    const owner = request.currentUser!;
+    const { id } = request.params as { id: string };
+    const instance = await getOwnedInstance(id, owner.id);
+    if (!instance) return reply.code(404).send({ error: 'not found' });
+
+    const data = await downloadNetworkCapture(sharedVolumeNameFor(id)).catch((err) => {
+      request.log.warn({ err, instanceId: id }, 'failed to download network capture');
+      return null;
+    });
+    if (data === null) return reply.code(404).send({ error: 'no capture available yet' });
+
+    // Same ASCII-fallback + filename* pattern as api/files.ts's download
+    // route — instance names can contain characters Node's setHeader throws
+    // on in a plain filename="..." header.
+    const asciiName = instance.name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
+    reply.header(
+      'Content-Disposition',
+      `attachment; filename="${asciiName}.pcap"; filename*=UTF-8''${encodeURIComponent(instance.name)}.pcap`,
+    );
+    reply.type('application/vnd.tcpdump.pcap');
+    return reply.send(data);
   });
 
   // Plan item #7 — hover-to-preview thumbnail. Same not-running 409 shape as

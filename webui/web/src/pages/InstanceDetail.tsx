@@ -9,6 +9,7 @@ import {
   type EgressPolicyInput,
   type SharedFileEntry,
   type ProcessEvent,
+  type NetworkCaptureInfo,
 } from '../api';
 import { formatBytes, formatMb, humanDuration, mmss, statusMeta, timeRemaining, versionLabel } from '../status';
 import { useInstanceLogs } from '../useInstanceLogs';
@@ -41,6 +42,7 @@ export function InstanceDetail() {
   const [deletingFile, setDeletingFile] = useState<string | null>(null);
   const [processEvents, setProcessEvents] = useState<ProcessEvent[] | null>(null);
   const [processEventsError, setProcessEventsError] = useState<string | null>(null);
+  const [networkCapture, setNetworkCapture] = useState<NetworkCaptureInfo | 'none' | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -156,6 +158,30 @@ export function InstanceDetail() {
         if (!cancelled) setProcessEvents(events);
       } catch (err) {
         if (!cancelled) setProcessEventsError(err instanceof Error ? err.message : 'Failed to load process activity');
+      }
+    }
+    poll();
+    const interval = runningNow ? setInterval(poll, 15000) : null;
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  }, [id, runningNow]);
+
+  // Plan item #17/#2/#3 — same fetch-once-then-poll-while-running shape as
+  // process events above. A 404 ("no capture available yet") is the normal
+  // state for a brand-new instance, not an error worth a banner — treated the
+  // same as any other fetch failure here, since this panel is informational
+  // rather than something a user depends on for a security decision.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    async function poll() {
+      try {
+        const info = await api.getNetworkCapture(id!);
+        if (!cancelled) setNetworkCapture(info);
+      } catch {
+        if (!cancelled) setNetworkCapture('none');
       }
     }
     poll();
@@ -756,6 +782,39 @@ export function InstanceDetail() {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Network capture">
+            <div className="vm-panel-body" style={{ display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--fg2)' }}>
+                All of this instance's network traffic, captured directly by its usermode networking backend. Download
+                the file and open it in Wireshark. Capture keeps growing for as long as the instance runs — there's no
+                per-tier size cap yet, so a long-lived session can produce a large file.
+              </div>
+              {networkCapture === null ? (
+                <div style={{ fontSize: 12, color: 'var(--fg3)' }}>Reading…</div>
+              ) : networkCapture === 'none' ? (
+                <div style={{ fontSize: 12, color: 'var(--fg3)' }}>No capture available yet.</div>
+              ) : (
+                <div className="vm-admin-row">
+                  <div className="vm-admin-row-main">
+                    <span className="vm-mono-dim" style={{ fontSize: 10.5 }}>
+                      {formatBytes(networkCapture.sizeBytes)} · updated{' '}
+                      {new Date(networkCapture.mtimeSeconds * 1000).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="vm-admin-row-side">
+                    <a
+                      className="vm-btn vm-btn--ghost vm-btn--sm"
+                      href={api.networkCaptureDownloadUrl(id!)}
+                      download={`${instance.name}.pcap`}
+                    >
+                      Download
+                    </a>
+                  </div>
                 </div>
               )}
             </div>

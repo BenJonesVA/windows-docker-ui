@@ -1,15 +1,9 @@
 import { nanoid } from 'nanoid';
 import { docker } from './client.js';
-import { execCapture, execWithStdin } from './exec.js';
+import { execCapture, execWithStdin, withHelperContainer } from './exec.js';
 import { db } from '../db/client.js';
 import { processEvents } from '../db/schema.js';
 
-// Plan item #13 (process execution telemetry). Same helper-image pattern
-// docker/files.ts and docker/firewall.ts already use — a short-lived
-// container built from the locally-built firewall helper image (already a
-// required deploy step), entrypoint overridden to `sleep` so `docker exec`
-// has something running to attach to.
-const FILE_HELPER_IMAGE = process.env.FIREWALL_HELPER_IMAGE ?? 'sandbox-firewall-helper:latest';
 const SHARED_MOUNT = '/shared';
 const TELEMETRY_SUBDIR = 'telemetry';
 
@@ -122,21 +116,6 @@ if ($Register) {
 }
 `;
 
-async function withHelperContainer<T>(binds: string[], fn: (containerId: string) => Promise<T>): Promise<T> {
-  const container = await docker.createContainer({
-    Image: FILE_HELPER_IMAGE,
-    Entrypoint: ['sleep'],
-    Cmd: ['300'],
-    HostConfig: { Binds: binds },
-  });
-  await container.start();
-  try {
-    return await fn(container.id);
-  } finally {
-    await container.remove({ force: true }).catch(() => {});
-  }
-}
-
 // Idempotent and cheap (two small text files) — always overwrite rather than
 // checking staleness first, so there's no second "is this already up to
 // date" code path to keep in sync. Called from template.ts's
@@ -155,6 +134,24 @@ export async function ensureOemAssets(): Promise<void> {
     const ps1 = await execWithStdin(containerId, ['sh', '-c', 'cat > /oem/collect-processes.ps1'], Buffer.from(COLLECT_PROCESSES_PS1, 'utf8'));
     if (ps1.exitCode !== 0) {
       throw new Error(`failed to write collect-processes.ps1: ${ps1.stderr.toString('utf8').slice(0, 500)}`);
+    }
+  });
+}
+
+// Plan item #17/#2/#3 (passt --pcap network capture) — unlike the process
+// collector above, which tolerates Z:\telemetry not existing yet and simply
+// skips a poll cycle, passt opens its --pcap path once at container start,
+// before Windows has even booted, let alone run any in-guest script. On a
+// brand-new instance's first boot the reserved telemetry/ subfolder doesn't
+// exist yet, so that open would fail — this ensures the directory exists
+// BEFORE the container (and therefore passt) starts. Called from
+// template.ts's createInstanceContainer, right after the shared volume
+// itself is ensured.
+export async function ensureTelemetryDir(sharedVolumeName: string): Promise<void> {
+  await withHelperContainer([`${sharedVolumeName}:${SHARED_MOUNT}`], async (containerId) => {
+    const result = await execCapture(containerId, ['mkdir', '-p', `${SHARED_MOUNT}/${TELEMETRY_SUBDIR}`]);
+    if (result.exitCode !== 0) {
+      throw new Error(`failed to create telemetry directory: ${result.stderr.toString('utf8').slice(0, 500)}`);
     }
   });
 }

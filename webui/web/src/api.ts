@@ -68,6 +68,11 @@ export interface ProcessEvent {
   cmdline: string | null;
 }
 
+export interface NetworkCaptureInfo {
+  sizeBytes: number;
+  mtimeSeconds: number;
+}
+
 export interface FirewallRule {
   id: string;
   action: 'allow' | 'deny';
@@ -206,6 +211,13 @@ export const api = {
   // currently running or not (rows are already ingested off the guest by the
   // reconciler by the time they're queryable here).
   getProcesses: (id: string, limit = 200) => request<ProcessEvent[]>(`/api/instances/${id}/processes?limit=${limit}`),
+  // Plan item #17/#2/#3 — passt --pcap capture. Same "works whether running
+  // or stopped" posture as the shared-files calls below. getNetworkCapture
+  // throws on a 404 (no capture yet) same as any other request() call —
+  // callers treat that as "nothing captured yet," not an error to surface.
+  getNetworkCapture: (id: string) => request<NetworkCaptureInfo>(`/api/instances/${id}/network-capture`),
+  // Consumed as an <a href download>, same rationale as downloadFileUrl below.
+  networkCaptureDownloadUrl: (id: string) => `/api/instances/${id}/network-capture/download`,
   // Not a JSON request() call — this is consumed directly as an <img src>,
   // which sends the session cookie itself (same-origin) without needing a
   // fetch+blob-URL round trip. cacheBust just needs to change per request to
