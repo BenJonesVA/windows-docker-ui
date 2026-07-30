@@ -3,11 +3,12 @@
 # in compose.yml and README.md. Idempotent — safe to re-run after a partial
 # failure or to pick up a newly-bumped pinned image digest.
 #
-# Usage: sudo ./install.sh [--yes] [--skip-daemon-config] [--seed-email=E --seed-password=P]
+# Usage: sudo ./install.sh [--yes] [--skip-daemon-config] [--skip-kvm-install] [--seed-email=E --seed-password=P]
 set -euo pipefail
 
 ASSUME_YES=0
 SKIP_DAEMON=0
+SKIP_KVM_INSTALL=0
 SEED_EMAIL=""
 SEED_PASSWORD=""
 
@@ -15,10 +16,11 @@ for arg in "$@"; do
   case "$arg" in
     --yes|-y) ASSUME_YES=1 ;;
     --skip-daemon-config) SKIP_DAEMON=1 ;;
+    --skip-kvm-install) SKIP_KVM_INSTALL=1 ;;
     --seed-email=*) SEED_EMAIL="${arg#*=}" ;;
     --seed-password=*) SEED_PASSWORD="${arg#*=}" ;;
     -h|--help)
-      echo "Usage: sudo $0 [--yes] [--skip-daemon-config] [--seed-email=E --seed-password=P]"
+      echo "Usage: sudo $0 [--yes] [--skip-daemon-config] [--skip-kvm-install] [--seed-email=E --seed-password=P]"
       exit 0
       ;;
     *)
@@ -51,10 +53,52 @@ info "Repo root: $REPO_ROOT"
 # --- 1. KVM ---------------------------------------------------------------
 if [ -e /dev/kvm ]; then
   info "KVM device present (/dev/kvm) — good."
-else
-  warn "/dev/kvm not found. Every sandbox instance will fail to start without it."
-  warn "Check virtualization is enabled in BIOS/hypervisor and 'kvm-ok' (apt install cpu-checker) passes."
+elif [ "$SKIP_KVM_INSTALL" = 1 ]; then
+  warn "/dev/kvm not found (--skip-kvm-install given). Every sandbox instance will fail to start without it."
   confirm "Continue anyway?" || fail "Aborted — fix KVM availability first."
+else
+  warn "/dev/kvm not found — attempting to install/enable KVM."
+
+  if ! grep -qE '(vmx|svm)' /proc/cpuinfo; then
+    warn "No 'vmx'/'svm' flag in /proc/cpuinfo — this CPU has no hardware virtualization exposed to this OS."
+    warn "That's either disabled in BIOS/hypervisor settings, or (if this host is itself a VM) nested"
+    warn "virtualization wasn't passed through by the outer hypervisor. Installing packages can't fix either case."
+    confirm "Continue anyway (sandboxes won't be able to start)?" || fail "Aborted — fix KVM availability first."
+  else
+    if grep -q vmx /proc/cpuinfo; then KVM_MODULE=kvm_intel; else KVM_MODULE=kvm_amd; fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+      info "Installing qemu-kvm + cpu-checker via apt..."
+      apt-get update -qq
+      apt-get install -y -qq qemu-kvm cpu-checker
+    elif command -v dnf >/dev/null 2>&1; then
+      info "Installing qemu-kvm via dnf..."
+      dnf install -y qemu-kvm
+    elif command -v yum >/dev/null 2>&1; then
+      info "Installing qemu-kvm via yum..."
+      yum install -y qemu-kvm
+    else
+      warn "No supported package manager found (apt-get/dnf/yum) — install a KVM-capable qemu package by hand."
+    fi
+
+    modprobe "$KVM_MODULE" 2>/dev/null || true
+
+    if [ -e /dev/kvm ]; then
+      info "KVM device now present (/dev/kvm)."
+      # Only useful for a human running kvm-ok/qemu directly as themselves —
+      # the manager itself talks to Docker as root via the socket, so this
+      # doesn't affect it either way.
+      if getent group kvm >/dev/null 2>&1 && [ -n "${SUDO_USER:-}" ]; then
+        usermod -aG kvm "$SUDO_USER" || true
+        info "Added $SUDO_USER to the 'kvm' group (log out/in for that to take effect)."
+      fi
+    else
+      warn "/dev/kvm still missing after installing packages and loading $KVM_MODULE."
+      warn "Check virtualization is enabled in BIOS/hypervisor settings, and (if this host is itself a VM)"
+      warn "that the outer hypervisor passes through nested virtualization. 'kvm-ok' (if installed) gives the specific reason."
+      confirm "Continue anyway?" || fail "Aborted — fix KVM availability first."
+    fi
+  fi
 fi
 
 # --- 2. Docker daemon address-pool (deploy/daemon.json) --------------------
