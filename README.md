@@ -1,5 +1,12 @@
 # Sandbox Console
 
+![Status: WIP](https://img.shields.io/badge/status-work--in--progress-orange)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](webui/package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](webui)
+[![Fastify](https://img.shields.io/badge/Fastify-000000?logo=fastify&logoColor=white)](webui/package.json)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](compose.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 ### This is a work in progress and in no way should be used in any sort of production environment.  I'll let you know when it gets to that point!
 
 A self-hosted manager for disposable Windows VMs running in Docker. Sign in, click
@@ -121,6 +128,9 @@ per-deployment / per-instance, not baked in:
   published ports — the authenticated proxy is the only path in.
 
 ## License
+
+This project (`webui/` and everything else in this repo except `windows/`)
+is licensed under the [MIT License](LICENSE).
 
 See [`windows/license.md`](windows/license.md) for dockur/windows' license.
 This project does not distribute Windows itself; you are responsible for
